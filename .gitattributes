@@ -1,2 +1,2 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Use LF for text files on every platform; leave binary files unchanged.
+* text=auto eol=lf

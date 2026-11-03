@@ -1,28 +1,24 @@
-.env
-config.json
-.claude
-.agents
-.vscode
-backend/README.md
-nocturne_memory.db
-nocturne_data*.db
-migration_log.json
-scripts/backup_memory.ps1
+# Rust build and release artifacts
+/target/
+/dist/
+/temp/
+
+# Local databases, SQLite sidecars, backups and exports
+*.db
+*.sqlite
+*.sqlite3
+*-wal
+*-shm
+*-journal
 *.bak
-*.db-shm
-*.db-wal
+/snapshots/
+/backups/
+/exports/
+/assets/
+/benchmarks/
 
-# Python
-.venv/
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-frontend/node_modules
-snapshots/
-assets/
-frontend/dist/
-backups/
-
-# Sisyphus tooling artifacts
-.sisyphus/
+# Local configuration and retired application state
+.env
+.env.*
+config.json
+migration_log.json

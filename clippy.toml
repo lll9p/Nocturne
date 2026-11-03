@@ -1,0 +1,3 @@
+allow-expect-in-tests = true
+
+disallowed-methods = []

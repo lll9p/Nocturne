@@ -1,0 +1,97 @@
+[package]
+name = "nocturne"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A local-first memory CLI with SQLite search, version history, and reversible changes"
+readme = "README.md"
+keywords = ["cli", "memory", "sqlite"]
+categories = ["command-line-utilities", "database"]
+include = [
+    "/build.rs",
+    "/src/**",
+    "/tests/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/README_EN.md",
+    "/LICENSE",
+]
+
+[package.metadata.nocturne]
+schema-version = 1
+
+[[bin]]
+name = "nocturne"
+path = "src/main.rs"
+
+[dependencies]
+aho-corasick = "1.1.5"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+directories = "6.0.0"
+jieba-rs = "0.11.0"
+rusqlite.workspace = true
+serde_json.workspace = true
+similar = "3.2.1"
+thiserror = "2.0.21"
+unicode-normalization = "0.1.26"
+uuid = { version = "1.29.0", features = ["v4"] }
+
+[build-dependencies]
+toml = { version = "1.1.8", default-features = false, features = ["std", "parse", "serde"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[workspace]
+members = ["xtask"]
+default-members = ["."]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/lll9p/Nocturne"
+
+[workspace.dependencies]
+rusqlite = { version = "0.41.1", features = ["bundled", "backup"] }
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+
+[workspace.lints.clippy]
+# Reliability & Core Safety
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "warn"
+unimplemented = "deny"
+dbg_macro = "deny"
+disallowed_methods = "deny"
+empty_loop = "deny"
+manual_assert = "warn"
+wildcard_imports = "warn"
+
+# Concurrency & Performance
+await_holding_lock = "deny"
+float_cmp = "deny"
+inefficient_to_string = "deny"
+large_enum_variant = "warn"
+cloned_instead_of_copied = "warn"
+needless_pass_by_value = "warn"
+map_entry = "warn"
+
+# Style & Best Practices
+match_same_arms = "warn"
+redundant_closure_for_method_calls = "warn"
+enum_glob_use = "warn"
+cast_lossless = "warn"
+
+[profile.release]
+lto = true
+strip = "symbols"
+panic = "abort"
+codegen-units = 1 # Maximum cross-module optimization
+opt-level = 3
+debug = false

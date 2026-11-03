@@ -1,0 +1,7 @@
+# Stable options
+edition = "2024"
+max_width = 80
+newline_style = "Unix"
+use_field_init_shorthand = true
+reorder_imports = true
+fn_params_layout = "Compressed"
