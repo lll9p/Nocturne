@@ -64,7 +64,7 @@ pub fn edit(
         }
     }
     Ok(
-        json!({"node_uuid":node,"keywords":list(c, ns, Some(&node))?,"added":added,"removed":removed,"skipped":skipped}),
+        json!({"uri":uri,"node_uuid":node,"keywords":list(c, ns, Some(&node))?,"added":added,"removed":removed,"skipped":skipped}),
     )
 }
 
@@ -132,7 +132,7 @@ pub fn list(
     let mut stmt = conn.prepare(
         "SELECT g.keyword,g.node_uuid,p.domain,p.path,m.content FROM glossary_keywords g
         LEFT JOIN paths p ON p.node_uuid=g.node_uuid AND p.namespace=g.namespace
-        LEFT JOIN memories m ON m.node_uuid=g.node_uuid AND m.deprecated=0 AND p.node_uuid IS NOT NULL
+        LEFT JOIN memory_rows m ON m.node_uuid=g.node_uuid AND m.deprecated=0 AND p.node_uuid IS NOT NULL
         WHERE g.namespace=?1 ORDER BY g.keyword,p.domain,p.path,g.node_uuid",
     )?;
     let mut rows = stmt.query([namespace])?;

@@ -7,6 +7,7 @@ pub mod glossary;
 pub mod graph;
 pub mod import_dir;
 pub mod maintenance;
+pub mod manifest;
 pub mod orphans;
 pub mod patch;
 pub mod paths;
@@ -21,3 +22,5 @@ pub mod uri;
 pub mod views;
 
 pub use store::Store;
+
+mod content;

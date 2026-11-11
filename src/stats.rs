@@ -73,6 +73,25 @@ fn collect(c: &Connection) -> Result<Value> {
             }))
         },
     )?;
+    let contents = c.query_row(
+        "WITH bodies AS (
+            SELECT length(CAST(b.content AS BLOB)) AS bytes,
+                EXISTS(SELECT 1 FROM main.memories m WHERE m.content_id=b.id) AS business,
+                EXISTS(SELECT 1 FROM main.change_rows r WHERE r.before_content_id=b.id OR r.after_content_id=b.id) AS audit
+            FROM main.contents b
+         ) SELECT count(*),coalesce(sum(bytes),0),
+            count(CASE WHEN NOT business AND audit THEN 1 END),
+            coalesce(sum(CASE WHEN NOT business AND audit THEN bytes ELSE 0 END),0),
+            count(CASE WHEN NOT business AND NOT audit THEN 1 END),
+            coalesce(sum(CASE WHEN NOT business AND NOT audit THEN bytes ELSE 0 END),0)
+         FROM bodies",
+        [],
+        |r| Ok(json!({
+            "stored":{"rows":r.get::<_,i64>(0)?,"content_bytes":r.get::<_,i64>(1)?},
+            "audit_only":{"rows":r.get::<_,i64>(2)?,"content_bytes":r.get::<_,i64>(3)?},
+            "unreferenced":{"rows":r.get::<_,i64>(4)?,"content_bytes":r.get::<_,i64>(5)?}
+        })),
+    )?;
     let mut attrs_rows = 0u64;
     let mut attrs_bytes = 0u64;
     let mut q = c.prepare("SELECT data_json FROM main.node_attrs")?;
@@ -91,7 +110,7 @@ fn collect(c: &Connection) -> Result<Value> {
     let (mut orphan_versions, mut orphan_bytes) = (0u64, 0u64);
     let mut q = c.prepare(
         "SELECT m.content,m.deprecated,m.node_uuid<>?1 AND NOT EXISTS
-         (SELECT 1 FROM main.paths p WHERE p.node_uuid=m.node_uuid) FROM main.memories m",
+         (SELECT 1 FROM main.paths p WHERE p.node_uuid=m.node_uuid) FROM main.memory_rows m",
     )?;
     let mut rows = q.query([ROOT])?;
     while let Some(row) = rows.next()? {
@@ -125,9 +144,13 @@ fn collect(c: &Connection) -> Result<Value> {
         while let Some(row) = rows.next()? {
             change_rows += 1;
             for index in [0, 1] {
-                snapshot_bytes += row
-                    .get::<_, Option<String>>(index)?
-                    .map_or(0, |s| s.len() as u64);
+                if let Some(snapshot) = row.get::<_, Option<String>>(index)? {
+                    let value = crate::content::expand(
+                        c,
+                        serde_json::from_str(&snapshot)?,
+                    )?;
+                    snapshot_bytes += value.to_string().len() as u64;
+                }
             }
         }
         review[status] = json!({"changesets":changesets,"change_rows":change_rows,"snapshot_bytes":snapshot_bytes});
@@ -144,12 +167,14 @@ fn collect(c: &Connection) -> Result<Value> {
             "memory_nodes_excludes_root":true,
             "orphan_definition":"Non-ROOT nodes with no path in any namespace; versions and bytes include all their memory versions",
             "text_bytes":"UTF-8 payload bytes, not physical table allocation",
-            "storage_bytes":"SQLite main database page accounting, not per-table allocation"
+            "storage_bytes":"SQLite main database page accounting, not per-table allocation",
+            "contents_bytes":"Stored text payload bytes in database encoding, not physical allocation"
         },
         "storage":{"page_size_bytes":page_size,"page_count":pages,"freelist_pages":free,
             "allocated_bytes":page_size*pages,"free_bytes":page_size*free,"used_bytes":page_size*(pages-free),
             "main_file_bytes":main_file_bytes,"wal_file_bytes":wal_file_bytes},
         "counts":counts,
+        "contents":contents,
         "node_attrs":{"rows":attrs_rows,"data_bytes":attrs_bytes},
         "memories":{
             "total":{"versions":active+deprecated,"content_bytes":active_bytes+deprecated_bytes},

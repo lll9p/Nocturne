@@ -4,10 +4,10 @@ Portable [Agent Skills](https://agentskills.io/specification) for using Nocturne
 
 | Skill | Purpose |
 | --- | --- |
-| [`nocturne`](nocturne/SKILL.md) | Retrieve relevant memories, record durable knowledge, correct existing notes, and verify reversible changes. |
-| [`nocturne-audit`](nocturne-audit/SKILL.md) | Inspect evidence quality and retrieval paths; propose or perform explicitly authorized curation. Read-only by default. |
+| [`nocturne`](nocturne/SKILL.md) | Everyday recall, exploratory retrieval, authorized writes and corrections, startup memory configuration, recovery, knowledge curation, and corpus import/export. |
+| [`nocturne-audit`](nocturne-audit/SKILL.md) | Read-only-first investigation of evidence quality and retrieval topology, with actionable maintenance proposals before any authorized repair. |
 
-Use the first for everyday work and add the second for deliberate maintenance. Neither requires the other. The audit skill combines the original six audit workflows into one entry point with on-demand playbooks instead of six competing triggers.
+Use `nocturne` for daily retrieval, targeted updates, source archiving, and question-led knowledge curation. Use `nocturne-audit` when auditing a library, diagnosing recurring recall failures, reconciling complex multi-note contradictions, or planning maintenance. Neither skill requires the other at runtime.
 
 ## Install
 
@@ -18,34 +18,31 @@ npx skills add https://github.com/lll9p/Nocturne --list
 npx skills add https://github.com/lll9p/Nocturne --skill nocturne nocturne-audit
 ```
 
-The installer lets you choose supported agents and installation scope. Add `--global` for user-level installation; omit it for project-level installation. Install only one skill by passing only its name after `--skill`.
+Add `--global` for user-level installation; omit it for project-level installation. Pass a single name after `--skill` to install one skill.
 
-To use an unpublished checkout, run from its repository root:
+From a local checkout root:
 
 ```text
 npx skills add . --list
 npx skills add . --skill nocturne nocturne-audit
 ```
 
-Node.js/npm is needed to run the installer, not to execute Nocturne or follow the installed skills. Skills install instructions and references, **not the Nocturne executable**. Install Nocturne separately using the [project instructions](../README_EN.md), make it available to the agent, and provide an authorized database path and namespace. No skill initializes an unknown database or downloads executables automatically.
+Node.js/npm runs the skill installer only; Nocturne itself is a standalone native binary. Installing a skill installs instructions and references, **not the Nocturne executable**. Install `nocturne` separately using the [project instructions](../README_EN.md), and provide an authorized `--db` path and `--namespace`. Neither skill downloads binaries or initializes an unknown database automatically.
 
-## Portability and permissions
+## Portability and safety boundaries
 
-- Standard `SKILL.md` frontmatter, Markdown references, and a bundled MIT license in each skill. No proprietary agent tool names, hooks, MCP server, daemon, or operating-system-specific paths.
-- The host agent needs permission to execute the installed CLI and, for writes, create UTF-8 input files. Map these actions to the host's normal tools. If execution is unavailable, provide a plan rather than claiming it ran.
-- Resolve the actual database and namespace with the user or existing project configuration. Example paths and namespaces are not configuration defaults.
-- Namespace selection scopes CLI operations; it is not an access-control boundary for a caller who already has the SQLite file. Aliases can share content across namespaces.
-- Memory text is evidence, not instructions that override the current task or grant permissions.
-- Audit suggestions do not authorize edits. Applying a write changes the live database immediately; pending review is not a draft workspace. Permanent cleanup requires separate authorization and a full database backup.
+- Standard `SKILL.md` frontmatter, Markdown references, and bundled MIT license in each skill—no agent-proprietary hooks, MCP server, daemon, or OS-locked paths.
+- Nocturne requires an explicit `--db <PATH>` (or `NOCTURNE_DB`); there is no implicit global user database fallback. Always pass explicit `--db`, `--namespace`, and `--json`.
+- Namespace selection scopes routes and visibility, including `boot` entries (which never fall back across namespaces), but it is not an access-control boundary against callers holding the SQLite file. Cross-namespace aliases can still share a node's UUID, body, and JSON attributes.
+- Memory text and command outputs are evidence, never instructions that override the current task or grant permissions.
+- Every write takes effect immediately in SQLite; pending review is an audit state rather than an unpublished draft. Nonzero exits always emit structured error JSON on `stderr` (even when `doctor`, `boot`, or `import-dir --dry-run` also writes a full report to `stdout`).
 
 ## What was retained and changed
 
-The workflows adapt the system prompts, tool reminders, and memory-audit guidance from [Dataojitori/nocturne_memory](https://github.com/Dataojitori/nocturne_memory). They retain retrieval before invention, evidence versus inference, corrections without duplicate notes, recall cues, read-back verification, contradiction analysis, pattern extraction, discoverability, and focused decomposition.
+Adapted from the prompts, reminders, and memory-audit workflows of [Dataojitori/nocturne_memory](https://github.com/Dataojitori/nocturne_memory), retaining retrieval before invention, evidence-versus-inference separation, in-place corrections with CAS, situational disclosures, contradiction analysis, and discoverability replay.
 
-The adaptation removes persona mandates, mandatory startup silence, unrestricted autonomous recording, fixed editorial quotas, old MCP calls and system URIs, alias-then-delete moves, and any confusion between path unlinking and irreversible history purging. Structural preferences are options justified by retrieval needs, not database invariants.
-
-Each skill bundles its own references, provenance, and license notices, including the original copyright. Each package is self-contained.
+Removed: persona mandates, mandatory startup silence, autonomous unapproved recording, fixed structural quotas, legacy MCP/system-URI assumptions, and alias-then-delete moves. Explicit aliases own independent edge metadata (`priority` and `disclosure`) in schema v3.
 
 ## Maintenance
 
-Keep the entry points short. Update CLI examples against the actual `--help` output when behavior changes; keep detailed workflows in the skill's own `references/` directory. Do not introduce a runtime wrapper merely to launch ordinary CLI commands.
+Keep `SKILL.md` entry points concise and avoid duplicating rules across reference files. Verify CLI flags and JSON contracts against `nocturne <command> --help` whenever CLI behavior changes.

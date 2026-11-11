@@ -111,18 +111,16 @@ fn cross_parent_domain_inherits_metadata_and_rollback_restores_boot_and_fts() {
     );
 }
 
-// Prevent a default-namespace move from silently rewriting another namespace's inherited startup routes.
+// Boot loading must isolate namespaces without falling back to "" and honor --no-track.
 #[test]
-fn boot_fallback_overrides_are_namespace_local_and_default_move_freezes_inheritors()
- {
+fn boot_isolates_namespaces_without_default_fallback_and_supports_no_track() {
     let s = Store::memory().unwrap();
     create(&s, "", "core://", "one");
     create(&s, "a", "core://", "one");
-    create(&s, "b", "core://", "one");
     let c = s.connection();
     preset(
         c,
-        "fallback",
+        "isolated",
         json!({"":["core://one"],"explicit":["core://one"]}),
         true,
     );
@@ -132,22 +130,42 @@ fn boot_fallback_overrides_are_namespace_local_and_default_move_freezes_inherito
         json!({"":["core://one"],"a":["core://one"]}),
         false,
     );
-    preset(c, "unmatched", json!({"":["core://elsewhere"]}), false);
+    assert_eq!(nocturne::views::boot_uris(c, "a").unwrap(), json!([]));
+    assert_eq!(
+        nocturne::views::boot_with_tracking(c, "a", false).unwrap()["loaded"],
+        json!([])
+    );
+    let tracked_before: i64 = c
+        .query_row("SELECT count(*) FROM memory_access_logs", [], |r| r.get(0))
+        .unwrap();
+    let loaded = nocturne::views::boot_with_tracking(c, "", false).unwrap();
+    assert_eq!(loaded["loaded"].as_array().unwrap().len(), 1);
+    let tracked_after: i64 = c
+        .query_row("SELECT count(*) FROM memory_access_logs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(tracked_after, tracked_before);
+    let last_access: Option<String> = c
+        .query_row(
+            "SELECT last_accessed_at FROM nodes WHERE uuid=?1",
+            [loaded["loaded"][0]["node_uuid"].as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(last_access.is_none());
+
     s.write("a", None, |c| paths::rename(c, "a", "core://one", "two"))
         .unwrap();
     assert_eq!(
-        boots(c, "fallback"),
-        json!({"":["core://one"],"a":["core://two"],"explicit":["core://one"]})
+        boots(c, "isolated"),
+        json!({"":["core://one"],"explicit":["core://one"]})
     );
     assert_eq!(boots(c, "inactive")["a"][0], "core://two");
     s.write("", None, |c| paths::rename(c, "", "core://one", "three"))
         .unwrap();
-    let map = boots(c, "fallback");
-    assert_eq!(map[""][0], "core://three");
-    assert_eq!(map["b"][0], "core://one");
-    assert_eq!(map["a"][0], "core://two");
-    assert_eq!(map["explicit"][0], "core://one");
-    assert_eq!(boots(c, "unmatched"), json!({"":["core://elsewhere"]}));
+    assert_eq!(
+        boots(c, "isolated"),
+        json!({"":["core://three"],"explicit":["core://one"]})
+    );
     assert_eq!(
         c.query_row(
             "SELECT count(*) FROM presets WHERE path_masks='[\"untouched\"]'",
@@ -155,7 +173,7 @@ fn boot_fallback_overrides_are_namespace_local_and_default_move_freezes_inherito
             |r| r.get::<_, i64>(0)
         )
         .unwrap(),
-        3
+        2
     );
 }
 
@@ -166,14 +184,14 @@ fn rollback_move_rejects_cycle_through_later_alias() {
     create(&s, "", "core://", "a");
     create(&s, "", "core://a", "b");
     create(&s, "", "core://", "c");
-    s.write("", None, |c| graph::alias(c, "", "other://b", "core://a/b"))
+    s.write("", None, |c| graph::alias(c, "", "core://a/b", "other://b"))
         .unwrap();
     let moved = s
         .write("", None, |c| {
             paths::move_path(c, "", "core://a/b", "core://c/b")
         })
         .unwrap();
-    s.write("", None, |c| graph::alias(c, "", "other://b/a", "core://a"))
+    s.write("", None, |c| graph::alias(c, "", "core://a", "other://b/a"))
         .unwrap();
     let c = s.connection();
     let before = crate::changes::diff(

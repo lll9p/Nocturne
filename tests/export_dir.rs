@@ -63,3 +63,26 @@ fn case_collisions_are_rejected_before_writing() {
     ));
     assert!(names(tmp.path()).is_empty());
 }
+
+// Segment-aware selection must not include underscore lookalikes, sibling prefixes or other namespaces.
+#[test]
+fn subtree_is_a_namespace_local_path_view() {
+    use nocturne::export_dir::export_with_options;
+    let s = Store::memory().unwrap();
+    create(&s, "a", "lit://", "doc_s", "parent");
+    create(&s, "a", "lit://doc_s", "child", "child");
+    create(&s, "a", "lit://", "docXs", "wrong");
+    create(&s, "a", "lit://", "doc_s_extra", "wrong");
+    create(&s, "b", "lit://", "doc_s", "other namespace");
+    s.write("a", None, |c| {
+        graph::alias(c, "a", "lit://doc_s", "other://alias")
+    })
+    .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+    export_with_options(s.connection(), "a", &out, Some("lit://doc_s"), true)
+        .unwrap();
+    assert_eq!(fs::read(out.join("lit/doc_s.md")).unwrap(), b"parent");
+    assert_eq!(names(&out.join("lit")), vec!["doc_s", "doc_s.md"]);
+    assert!(!out.join("other").exists());
+}

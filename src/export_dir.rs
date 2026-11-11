@@ -1,4 +1,4 @@
-//! A plaintext URI view, not a lossless round-trip format for import-dir.
+//! Plaintext URI export with optional round-trip metadata.
 use crate::error::{Error, Result};
 use rusqlite::Connection;
 use serde_json::{Value, json};
@@ -10,7 +10,7 @@ use std::{
 };
 use unicode_normalization::UnicodeNormalization;
 
-fn component(name: &str) -> Result<()> {
+pub(crate) fn component(name: &str) -> Result<()> {
     let stem = name
         .split('.')
         .next()
@@ -167,6 +167,14 @@ fn publish(_: &Path, _: &Path) -> Result<()> {
 pub fn export(
     conn: &Connection, namespace: &str, output: &Path,
 ) -> Result<Value> {
+    export_with_options(conn, namespace, output, None, false)
+}
+
+pub fn export_with_options(
+    conn: &Connection, namespace: &str, output: &Path, root: Option<&str>,
+    with_metadata: bool,
+) -> Result<Value> {
+    let root = root.map(crate::uri::Uri::parse).transpose()?;
     if !conn.is_autocommit() {
         return Err(Error::Invalid(
             "export-dir requires a connection without an active transaction"
@@ -193,8 +201,11 @@ pub fn export(
     let parent = fs::canonicalize(parent)?;
     let target = parent.join(name);
     let tx = conn.unchecked_transaction()?;
+    if let Some(root) = &root {
+        crate::graph::resolve(&tx, namespace, &root.display())?;
+    }
     let rows = {
-        let mut stmt = tx.prepare("SELECT p.domain,p.path,m.id,length(CAST(m.content AS BLOB)) FROM paths p JOIN memories m ON m.node_uuid=p.node_uuid AND m.deprecated=0 WHERE p.namespace=?1 ORDER BY p.domain COLLATE BINARY,p.path COLLATE BINARY")?;
+        let mut stmt = tx.prepare("SELECT p.domain,p.path,m.id,length(CAST(m.content AS BLOB)) FROM paths p JOIN memory_rows m ON m.node_uuid=p.node_uuid AND m.deprecated=0 WHERE p.namespace=?1 ORDER BY p.domain COLLATE BINARY,p.path COLLATE BINARY")?;
         let rows = stmt.query_map([namespace], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -205,6 +216,19 @@ pub fn export(
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter(|(domain, path, _, _)| {
+            root.as_ref().is_none_or(|r| {
+                domain == &r.domain
+                    && (r.path.is_empty()
+                        || path == &r.path
+                        || path
+                            .strip_prefix(&r.path)
+                            .is_some_and(|s| s.starts_with('/')))
+            })
+        })
+        .collect();
     let parents: BTreeSet<_> = rows
         .iter()
         .flat_map(|(domain, path, _, _)| {
@@ -243,7 +267,8 @@ pub fn export(
     let mut files = 0;
     let mut dirs = 0;
     // Prefix ordering puts explicit parents first; exclusive creation also rejects OS aliases.
-    let mut content = tx.prepare("SELECT content FROM memories WHERE id=?1")?;
+    let mut content =
+        tx.prepare("SELECT content FROM memory_rows WHERE id=?1")?;
     for (path, memory_id) in entries.values() {
         let dest = staging.0.join(path);
         if let Some(memory_id) = memory_id {
@@ -264,10 +289,20 @@ pub fn export(
         }
     }
     drop(content);
+    if with_metadata {
+        let manifest =
+            crate::manifest::export_metadata(&tx, namespace, &rows, &parents)?;
+        let dest = staging.0.join("nocturne-manifest.json");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dest)?;
+        file.write_all(&serde_json::to_vec_pretty(&manifest.value())?)?;
+    }
     tx.commit()?;
     publish(&staging.0, &target)?;
     Ok(
-        json!({"scope":"namespace", "namespace":namespace, "output":output, "files":files, "dirs":dirs}),
+        json!({"scope":if root.is_some() {"subtree"} else {"namespace"}, "namespace":namespace, "output":output, "files":files, "dirs":dirs}),
     )
 }
 

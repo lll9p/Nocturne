@@ -14,7 +14,7 @@ fn schema(table: &str) -> Result<Schema> {
         "memories" => &[
             "id",
             "node_uuid",
-            "content",
+            "content_id",
             "deprecated",
             "migrated_to",
             "created_at",
@@ -211,19 +211,56 @@ fn net_rows(
     Ok(rows)
 }
 pub fn list(c: &Connection, ns: &str) -> Result<Value> {
+    list_filtered(c, ns, None, None, 0)
+}
+pub fn list_filtered(
+    c: &Connection, ns: &str, status: Option<&str>, limit: Option<usize>,
+    offset: usize,
+) -> Result<Value> {
+    if let Some(s) = status
+        && !matches!(s, "pending" | "accepted" | "rolled_back")
+    {
+        return Err(Error::Invalid(format!("invalid review status: {s:?}")));
+    }
+    let offset = i64::try_from(offset).map_err(|_| {
+        Error::Invalid("review offset exceeds SQLite integer range".into())
+    })?;
+    let limit = match limit {
+        Some(v) => i64::try_from(v).map_err(|_| {
+            Error::Invalid("review limit exceeds SQLite integer range".into())
+        })?,
+        None => -1,
+    };
     let mut q = c.prepare(
-        "SELECT id,batch,status,namespace,created_at FROM changesets WHERE namespace=?1 ORDER BY rowid DESC",
+        "SELECT id,batch,status,namespace,created_at FROM changesets
+         WHERE namespace=?1 AND (?2 IS NULL OR status=?2)
+         ORDER BY rowid DESC LIMIT ?3 OFFSET ?4",
     )?;
-    let rows=q.query_map([ns],|r|Ok(json!({"id":r.get::<_,String>(0)?,"batch":r.get::<_,Option<String>>(1)?,"status":r.get::<_,String>(2)?,"namespace":r.get::<_,String>(3)?,"created_at":r.get::<_,String>(4)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
+    let rows = q
+        .query_map(params![ns, status, limit, offset], |r| {
+            Ok(json!({
+                "id":r.get::<_,String>(0)?,
+                "batch":r.get::<_,Option<String>>(1)?,
+                "status":r.get::<_,String>(2)?,
+                "namespace":r.get::<_,String>(3)?,
+                "created_at":r.get::<_,String>(4)?
+            }))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(json!(rows))
+}
+pub(crate) fn has_changes(
+    c: &Connection, ns: &str, id: &str, batch: bool,
+) -> Result<bool> {
+    Ok(!net_rows(c, ns, id, batch)?.is_empty())
 }
 pub fn diff(c: &Connection, ns: &str, id: &str, batch: bool) -> Result<Value> {
     states(c, ns, id, batch)?;
     Ok(json!(
         net_rows(c, ns, id, batch)?
             .into_iter()
-            .map(|r| json!({"table":r.table,"before":r.before,"after":r.after}))
-            .collect::<Vec<_>>()
+            .map(|r| Ok(json!({"table":r.table,"before":crate::content::expand(c,r.before)?,"after":crate::content::expand(c,r.after)?})))
+            .collect::<Result<Vec<_>>>()?
     ))
 }
 /// Human-readable review; `diff` remains the complete machine-readable audit snapshot.
@@ -231,7 +268,11 @@ pub fn diff_text(
     c: &Connection, ns: &str, id: &str, batch: bool,
 ) -> Result<String> {
     states(c, ns, id, batch)?;
-    let rows = net_rows(c, ns, id, batch)?;
+    let mut rows = net_rows(c, ns, id, batch)?;
+    for row in &mut rows {
+        row.before = crate::content::expand(c, row.before.take())?;
+        row.after = crate::content::expand(c, row.after.take())?;
+    }
     let mut bodies: BTreeMap<String, [Option<&Value>; 2]> = BTreeMap::new();
     for row in rows.iter().filter(|r| r.table == "memories") {
         for (side, value) in [&row.before, &row.after].into_iter().enumerate() {
@@ -321,9 +362,7 @@ fn states(
         .collect::<std::result::Result<Vec<String>, _>>()?;
     if rows.is_empty() {
         let message = if batch {
-            format!(
-                "batch {id:?} has no changesets in namespace {ns:?}; writes with no changes do not create a batch"
-            )
+            format!("batch {id:?} has no changesets in namespace {ns:?}")
         } else {
             format!("changeset {id:?} not found in namespace {ns:?}")
         };
@@ -490,7 +529,7 @@ fn rollback_context(
             "\nReferences exist in another namespace (details hidden).",
         );
     }
-    message.push_str("\nReview and undo subsequent changes first, then retry.");
+    message.push_str("\nInspect the blocking references and related changesets before retrying.");
     Ok(Error::RollbackConflict {
         message,
         blocking_uris: uris.into_iter().collect(),

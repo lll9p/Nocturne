@@ -27,7 +27,7 @@ pub fn read_with_children(
     c: &Connection, ns: &str, uri: &str, track: bool, include_children: bool,
 ) -> Result<Value> {
     let id = resolve(c, ns, uri)?;
-    let mut v=c.query_row("SELECT id,content FROM memories WHERE node_uuid=?1 AND deprecated=0",[&id],|r|Ok(json!({"node_uuid":id,"version":r.get::<_,i64>(0)?,"content":r.get::<_,String>(1)?,"uri":uri}))).optional()?.ok_or_else(||Error::NotFound(format!("URI {uri} not found in namespace {ns:?}")))?;
+    let mut v=c.query_row("SELECT id,content FROM memory_rows WHERE node_uuid=?1 AND deprecated=0",[&id],|r|Ok(json!({"node_uuid":id,"version":r.get::<_,i64>(0)?,"content":r.get::<_,String>(1)?,"uri":uri}))).optional()?.ok_or_else(||Error::NotFound(format!("URI {uri} not found in namespace {ns:?}")))?;
     let u = Uri::parse(uri)?;
     let metadata=c.query_row("SELECT e.priority,e.disclosure FROM paths p JOIN edges e ON e.id=p.edge_id WHERE p.namespace=?1 AND p.domain=?2 AND p.path=?3",params![ns,u.domain,u.path],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,Option<String>>(1)?))).optional()?;
     if let Some((priority, disclosure)) = metadata {
@@ -92,8 +92,8 @@ pub(crate) fn create_record(
     let id = uuid::Uuid::new_v4().to_string();
     c.execute("INSERT INTO nodes(uuid) VALUES(?1)", [&id])?;
     c.execute(
-        "INSERT INTO memories(node_uuid,content) VALUES(?1,?2)",
-        params![id, content],
+        "INSERT INTO memories(node_uuid,content_id) VALUES(?1,?2)",
+        params![id, crate::content::insert(c, content)?],
     )?;
     let version = c.last_insert_rowid();
     c.execute(
@@ -115,6 +115,34 @@ pub fn update(
     edit(c, ns, uri, Some(content), None, None, expect)
 }
 
+pub fn check_version(
+    c: &Connection, ns: &str, uri: &str, expected: Option<i64>,
+) -> Result<(String, i64)> {
+    let id = resolve(c, ns, uri)?;
+    if id == ROOT {
+        return Err(Error::Invalid("cannot target domain root".into()));
+    }
+    let current: i64 = c
+        .query_row(
+            "SELECT id FROM memory_rows WHERE node_uuid=?1 AND deprecated=0",
+            [&id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            Error::NotFound(format!("URI {uri} not found in namespace {ns:?}"))
+        })?;
+    if let Some(expected) = expected.filter(|e| *e != current) {
+        return Err(Error::VersionConflict {
+            uri: uri.into(),
+            namespace: ns.into(),
+            expected,
+            current,
+        });
+    }
+    Ok((id, current))
+}
+
 pub fn edit(
     c: &Connection, ns: &str, uri: &str, content: Option<&str>,
     priority: Option<i64>, disclosure: Option<&str>, expected: Option<i64>,
@@ -128,37 +156,25 @@ pub fn edit(
     if Uri::parse(uri)?.domain == "system" {
         return Err(Error::Invalid("system domain is reserved".into()));
     }
-    let id = resolve(c, ns, uri)?;
-    let old: i64 = c.query_row(
-        "SELECT id FROM memories WHERE node_uuid=?1 AND deprecated=0",
-        [&id],
-        |r| r.get(0),
-    )?;
-    if let Some(expected) = expected.filter(|e| *e != old) {
-        return Err(Error::VersionConflict {
-            uri: uri.into(),
-            namespace: ns.into(),
-            expected,
-            current: old,
-        });
-    }
+    let (id, old) = check_version(c, ns, uri, expected)?;
     if priority.is_some() || disclosure.is_some() {
         meta(c, ns, uri, priority, disclosure)?;
     }
     let Some(content) = content else {
         return read(c, ns, uri, false);
     };
-    let previous: String =
-        c.query_row("SELECT content FROM memories WHERE id=?1", [old], |r| {
-            r.get(0)
-        })?;
+    let previous: String = c.query_row(
+        "SELECT content FROM memory_rows WHERE id=?1",
+        [old],
+        |r| r.get(0),
+    )?;
     if previous == content {
         return read(c, ns, uri, false);
     }
     c.execute("UPDATE memories SET deprecated=1 WHERE id=?1", [old])?;
     c.execute(
-        "INSERT INTO memories(node_uuid,content) VALUES(?1,?2)",
-        params![id, content],
+        "INSERT INTO memories(node_uuid,content_id) VALUES(?1,?2)",
+        params![id, crate::content::insert(c, content)?],
     )?;
     let new = c.last_insert_rowid();
     c.execute(
@@ -169,7 +185,7 @@ pub fn edit(
 }
 pub fn history(c: &Connection, ns: &str, uri: &str) -> Result<Value> {
     let id = resolve(c, ns, uri)?;
-    let mut q=c.prepare("SELECT id,content,deprecated,migrated_to FROM memories WHERE node_uuid=?1 ORDER BY id DESC")?;
+    let mut q=c.prepare("SELECT id,content,deprecated,migrated_to FROM memory_rows WHERE node_uuid=?1 ORDER BY id DESC")?;
     let rows=q.query_map([id],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"content":r.get::<_,String>(1)?,"deprecated":r.get::<_,bool>(2)?,"migrated_to":r.get::<_,Option<i64>>(3)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
     Ok(json!(rows))
 }
@@ -196,20 +212,23 @@ pub fn meta(
     Ok(json!({"updated":uri}))
 }
 pub fn alias(
-    c: &Connection, ns: &str, destination: &str, source: &str,
+    c: &Connection, ns: &str, source: &str, destination: &str,
 ) -> Result<Value> {
-    alias_with_meta(c, ns, destination, source, None, None)
+    alias_with_meta(c, ns, source, destination, None, None)
 }
 
 pub fn alias_with_meta(
-    c: &Connection, ns: &str, destination: &str, source: &str,
+    c: &Connection, ns: &str, source: &str, destination: &str,
     priority: Option<i64>, disclosure: Option<&str>,
 ) -> Result<Value> {
-    if let Some(priority) = priority {
-        validate_priority(priority)?;
-    }
-    if Uri::parse(source)?.domain == "system" {
+    let edge_priority = priority.unwrap_or(0);
+    validate_priority(edge_priority)?;
+    let src = Uri::parse(source)?;
+    if src.domain == "system" {
         return Err(Error::Invalid("system domain is reserved".into()));
+    }
+    if src.path.is_empty() {
+        return Err(Error::Invalid("cannot alias domain root".into()));
     }
     let node = resolve(c, ns, source)?;
     let dst = Uri::parse(destination)?;
@@ -217,7 +236,7 @@ pub fn alias_with_meta(
         return Err(Error::Invalid("system domain is reserved".into()));
     }
     if dst.path.is_empty() {
-        return Err(Error::Invalid("alias needs a name".into()));
+        return Err(Error::Invalid("alias needs a destination name".into()));
     }
     if source == destination {
         return Err(Error::Conflict(format!(
@@ -229,31 +248,33 @@ pub fn alias_with_meta(
         dst.path.rsplit_once('/').unwrap_or(("", &dst.path));
     validate_name(name, "alias name")?;
     let parent = resolve(c, ns, &format!("{}://{}", dst.domain, parent_path))?;
-    let cycle:bool=c.query_row("WITH RECURSIVE descendants(uuid) AS (SELECT ?1 UNION SELECT e.child_uuid FROM edges e JOIN descendants d ON e.parent_uuid=d.uuid) SELECT EXISTS(SELECT 1 FROM descendants WHERE uuid=?2)",params![node,parent],|r|r.get(0))?;
+    let cycle: bool = c.query_row(
+        "WITH RECURSIVE descendants(uuid) AS (SELECT ?1 UNION SELECT e.child_uuid FROM edges e JOIN descendants d ON e.parent_uuid=d.uuid) SELECT EXISTS(SELECT 1 FROM descendants WHERE uuid=?2)",
+        params![node, parent],
+        |r| r.get(0),
+    )?;
     if cycle {
         return Err(Error::Conflict("alias would create a cycle".into()));
     }
-    c.execute("INSERT INTO edges(parent_uuid,child_uuid,name) VALUES(?1,?2,?3) ON CONFLICT(parent_uuid,child_uuid) DO NOTHING",params![parent,node,name])?;
-    let edge: i64 = c.query_row(
-        "SELECT id FROM edges WHERE parent_uuid=?1 AND child_uuid=?2",
-        params![parent, node],
-        |r| r.get(0),
+    c.execute(
+        "INSERT INTO edges(parent_uuid,child_uuid,name,priority,disclosure) VALUES(?1,?2,?3,?4,?5)",
+        params![parent, node, name, edge_priority, disclosure],
     )?;
+    let edge = c.last_insert_rowid();
     c.execute(
         "INSERT INTO paths(namespace,domain,path,edge_id,node_uuid) VALUES(?1,?2,?3,?4,?5)",
         params![ns, dst.domain, dst.path, edge, node],
     )?;
-    if priority.is_some() || disclosure.is_some() {
-        meta(c, ns, destination, priority, disclosure)?;
-    }
     derive(c, ns, &dst.domain, &dst.path, &node)?;
-    Ok(json!({"uri":destination,"node_uuid":node}))
+    let mut created = read(c, ns, destination, false)?;
+    created["source"] = json!(source);
+    Ok(created)
 }
 fn derive(
     c: &Connection, ns: &str, domain: &str, path: &str, node: &str,
 ) -> Result<()> {
     let mut q =
-        c.prepare("SELECT e.id,e.child_uuid,e.name FROM edges e WHERE e.parent_uuid=?1 AND EXISTS(SELECT 1 FROM paths p WHERE p.edge_id=e.id AND p.namespace=?2) AND EXISTS(SELECT 1 FROM memories m WHERE m.node_uuid=e.child_uuid AND m.deprecated=0) ORDER BY e.id")?;
+        c.prepare("SELECT e.id,e.child_uuid,e.name FROM edges e WHERE e.parent_uuid=?1 AND EXISTS(SELECT 1 FROM paths p WHERE p.edge_id=e.id AND p.namespace=?2) AND EXISTS(SELECT 1 FROM memory_rows m WHERE m.node_uuid=e.child_uuid AND m.deprecated=0) ORDER BY e.id")?;
     let rows = q
         .query_map(params![node, ns], |r| {
             Ok((
@@ -286,23 +307,18 @@ fn derive(
 pub fn restore(
     c: &Connection, ns: &str, uri: &str, version: i64, expect: Option<i64>,
 ) -> Result<Value> {
-    let node = resolve(c, ns, uri)?;
-    let current: Option<i64> = c.query_row(
-        "SELECT max(id) FROM memories WHERE node_uuid=?1 AND deprecated=0",
-        [&node],
-        |r| r.get(0),
-    )?;
+    let (node, current) = check_version(c, ns, uri, expect)?;
     let text = c
         .query_row(
-            "SELECT content FROM memories WHERE id=?1 AND node_uuid=?2",
+            "SELECT content FROM memory_rows WHERE id=?1 AND node_uuid=?2",
             params![version, node],
             |r| r.get::<_, String>(0),
         )
         .optional()?
         .ok_or_else(|| {
-            Error::NotFound(format!("URI {uri} in namespace {ns:?}: requested version {version} not found; current version {current:?}"))
+            Error::NotFound(format!("URI {uri} in namespace {ns:?}: requested version {version} not found; current version {current}"))
         })?;
-    update(c, ns, uri, &text, expect)
+    update(c, ns, uri, &text, Some(current))
 }
 pub fn unlink(c: &Connection, ns: &str, uri: &str) -> Result<Value> {
     let u = Uri::parse(uri)?;
@@ -368,8 +384,13 @@ pub fn unlink(c: &Connection, ns: &str, uri: &str) -> Result<Value> {
             }
         }
     }
-    c.execute("DELETE FROM edges WHERE NOT EXISTS(SELECT 1 FROM paths p WHERE p.edge_id=edges.id) AND (parent_uuid=?1 OR child_uuid=?1)",[&target])?;
-    Ok(json!({"unlinked":uri}))
+    for node in &nodes {
+        c.execute(
+            "DELETE FROM edges WHERE NOT EXISTS(SELECT 1 FROM paths p WHERE p.edge_id=edges.id) AND (parent_uuid=?1 OR child_uuid=?1)",
+            [node],
+        )?;
+    }
+    Ok(json!({"unlinked":uri,"node_uuid":target}))
 }
 
 fn require_unused_path(

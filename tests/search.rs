@@ -109,3 +109,28 @@ fn keyword_removal_retokenizes_remaining_body() {
     assert_eq!(hits.as_array().unwrap().len(), 1);
     assert_eq!(hits[0]["node_uuid"], body["node_uuid"]);
 }
+
+// Non-CJK Unicode scripts must be tokenized into FTS rather than dropped as punctuation.
+#[test]
+fn non_cjk_unicode_scripts_tokenize_and_match() {
+    let s = Store::memory().unwrap();
+    let doc = s
+        .write("", None, |c| {
+            graph::create(
+                c,
+                "",
+                "core://",
+                "clinker",
+                "Phase β-C2S by Müller with кварц and cafe\u{301}",
+                0,
+                None,
+            )
+        })
+        .unwrap();
+    let c = s.connection();
+    for query in ["β", "β C2S", "Müller", "muller", "кварц", "café"] {
+        let hits = search::search(c, "", query, None, 10).unwrap();
+        assert_eq!(hits.as_array().unwrap().len(), 1, "query={query}");
+        assert_eq!(hits[0]["node_uuid"], doc["node_uuid"], "query={query}");
+    }
+}

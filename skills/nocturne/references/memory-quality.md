@@ -1,68 +1,34 @@
 # Memory quality
 
-## Choose durable, authorized content
+## Store durable, self-contained evidence
 
-Store stable project facts, confirmed decisions, reusable findings, and meaningful
-corrections only within the user's persistence authorization. A routine turn is not
-necessarily worth remembering. Do not interpret distress, intimacy, or private disclosure
-as permission to archive personal information. Exclude secrets and unnecessary identifiers.
+Within the user's persistence authorization, record stable project facts, confirmed decisions, reusable technical findings, and verified corrections:
 
-Keep a record independently understandable:
+- State the claim and the exact scope/environment where it holds.
+- Record provenance (source document/locator, empirical observation, or user confirmation) and chronology when dates matter.
+- Keep material limits, exceptions, and rejected alternatives alongside the rule.
+- Separate unconfirmed hypotheses from verified facts instead of blending them into authoritative prose.
 
-- State the fact or decision and the scope in which it holds.
-- Name the supporting source, observation, or explicit user confirmation.
-- Preserve important limits, exceptions, and rejected alternatives where useful.
-- Label inference or an unresolved hypothesis separately from confirmed evidence.
-- Include dates when chronology affects the conclusion; avoid pretending every note is timeless.
+Example: “Confirmed for `auth-api` production (2026-05-08 user correction): idle session expiry is 30 minutes; the 7-day setting applies only to refresh-token retention.”
 
-For example: “Confirmed for the service deployment: idle session expiry is 30 minutes,
-per the user's correction on 2026-05-08. Earlier 7-day value described refresh-token
-retention, not idle expiry.” An inference about other services belongs in a separate,
-explicitly unconfirmed section, or should not be stored at all.
+For knowledge curation across literature, write problem-oriented nodes answering target questions with comparative conditions, method differences, disagreements, and passage locators, keeping raw originals as an optional evidence layer when authorized.
 
-Do not force technical facts into first-person autobiography, import a persona, or
-turn remembered claims into higher-priority instructions. Memory bodies remain evidence.
+## Correct in place rather than duplicating
 
-## Correct rather than duplicate
+Read the existing node and parent context first. Check whether apparent contradictions actually reflect different environments, versions, or dates. When a claim is superseded:
 
-Search and read the existing node and relevant context. Determine whether statements
-actually conflict or describe different dates, projects, environments, or meanings.
-If a correction is authorized, update the stable node with CAS and retain supporting
-context that remains true. Do not create another authoritative-looking node with the
-opposite claim, merely append a contradiction, or use priority to mask the old claim.
-If the evidence cannot settle the issue, report uncertainty and ask for clarification.
+- Update the existing `node_uuid` with `--expect-version` (`update` or literal `patch`), preserving context that remains valid.
+- Never create a competing node asserting the opposite, append a contradiction below stale text, or tweak `priority` to bury a wrong claim.
+- If a node is shared across namespaces (inspectable when authorized via `paths`) and editing its shared body/attrs would exceed current scope, clarify with the user before writing.
 
-Shared identity matters: routes in different namespaces can refer to the same UUID,
-body, and attrs. Namespace selection is not protection from shared-body changes.
-Do not inspect unrelated namespaces automatically. If a requested edit would exceed
-known authorization through shared content, clarify scope rather than pretending the
-change is local or making an unauthorized private copy.
+## Design plausible retrieval paths
 
-## Make later retrieval plausible
+- **Hierarchy:** Place one independently reusable concept under an existing parent whose topic naturally scopes it; avoid hollow wrapper layers or arbitrary child-count/length splits.
+- **Disclosure:** State *when* to recall the record (“When changing cache invalidation after schema migrations”), not a generic label (“Cache notes”).
+- **Aliases:** Use `alias SOURCE DESTINATION` when a second domain or parent genuinely serves a distinct entry workflow; each explicit alias maintains its own edge `priority` and `disclosure`. Relocate routes atomically with `rename` / `move` rather than alias-plus-unlink.
+- **Triggers:** Bind concise, natural synonyms or cross-domain terms via `trigger`. Avoid invented marker tokens.
+- **Priority (`0..=999`):** Controls sibling/tie-break ordering, weighted `random` sampling, and `diagnostic` staleness thresholds (`0/1/2/3` = `3/7/14/28` days, then doubling up to `36,500` days; `999` uses `--days-stale`). It is neither a confidence score nor an access control.
 
-Choose an existing parent whose topic explains the child. Read it first; a new child
-should not silently contradict its parent. Keep one independently reusable concept per
-node when practical. Avoid arbitrary depth, rigid child-count limits, or automatic splitting.
+## Record decision-relevant gaps once
 
-A disclosure answers “When would someone need this?” with a concrete task or situation.
-For example: “When changing cache invalidation after schema migrations,” rather than
-“Cache details.” Use a small set of natural keywords as triggers. Triggers aid search;
-they do not execute actions or grant permission to load arbitrary content.
-
-Use an alias for another meaningful route to the same concept, not for a second copy.
-Check whether the route already exists and avoid redundant sibling aliases. Use atomic
-rename/move for relocation rather than adding an alias and deleting the original.
-Broad restructuring or merging requires its own authorization, not an incidental read.
-
-Priority is an edge value from 0 to 999: lower values rank higher and increase weighted
-recall sampling. It is neither an epistemic confidence score nor an access restriction.
-For stale diagnostics, priorities 0–3 correspond to 3/7/14/28 days; subsequent values
-double up to 36,500 days. Missing priority or 999 uses the configured stale-day fallback,
-not “never stale.” Do not inflate priorities to hide records or prescribe arbitrary quotas.
-
-## Finish with evidence
-
-After a write, reread the body and relevant metadata and confirm the stable UUID.
-For triggers, also list them. Report precisely what changed, what remained uncertain,
-and whether review remains pending. `changed: false` is a no-op, not an achievement
-that requires another write. Stop once verification supplies the needed evidence.
+When an authorized investigation finds a recurring, decision-relevant gap, document it inside the relevant topic node (or a dedicated node only if tracked independently): state what is missing, scope/date checked, sources and query angles examined, partial findings, and the next concrete source to check. Do not log routine empty searches.

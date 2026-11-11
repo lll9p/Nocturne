@@ -150,9 +150,17 @@ fn invalid_utf8_files_and_stdin_are_invalid_but_missing_files_are_io() {
     );
 }
 
-// A corrupt search index must make doctor fail even though its structured report is returned on stdout.
+// A corrupt search index must make doctor exit 1 with its report on stdout and structured error JSON on stderr.
 #[test]
-fn doctor_corrupt_index_exits_one() {
+fn doctor_corrupt_index_exits_one_and_missing_db_is_rejected() {
+    let missing_db = Command::new(env!("CARGO_BIN_EXE_nocturne"))
+        .env_remove("NOCTURNE_DB")
+        .env_remove("NOCTURNE_NAMESPACE")
+        .args(["--json", "stats"])
+        .output()
+        .unwrap();
+    code(missing_db, 2);
+
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("memory.db");
     let store = Store::create(&db).unwrap();
@@ -160,7 +168,6 @@ fn doctor_corrupt_index_exits_one() {
     store.connection().execute("INSERT INTO search_documents_fts(search_documents_fts) VALUES('delete-all')", []).unwrap();
     let out = output(&db, &["doctor"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(out.stderr.is_empty());
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["ok"], false);
     assert!(
@@ -170,4 +177,6 @@ fn doctor_corrupt_index_exits_one() {
             .iter()
             .any(|issue| issue["check"] == "fts_integrity")
     );
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["code"], "integrity");
 }

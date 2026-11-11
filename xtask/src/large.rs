@@ -31,9 +31,40 @@ fn physical(path: &Path) -> Result<Value> {
         let (name, size) = row?;
         tables.insert(name, size);
     }
-    Ok(
-        json!({"schema":scalar("PRAGMA user_version")?,"allocated_bytes":scalar("PRAGMA page_size")?*scalar("PRAGMA page_count")?,"free_bytes":scalar("PRAGMA page_size")?*scalar("PRAGMA freelist_count")?,"tables":tables}),
-    )
+    let mut categories = BTreeMap::<&str, i64>::new();
+    for (name, size) in &tables {
+        let category = if name.starts_with("search_documents_fts") {
+            "fts"
+        } else if name.contains("search_documents") {
+            "search"
+        } else if name == "contents"
+            || name == "memories"
+            || name == "active_memory"
+            || name == "memory_content"
+        {
+            "body"
+        } else if name == "change_rows"
+            || name.contains("changesets")
+            || name.starts_with("audit_")
+        {
+            "audit"
+        } else {
+            "other"
+        };
+        *categories.entry(category).or_default() += size;
+    }
+    Ok(json!({
+        "schema":scalar("PRAGMA user_version")?,
+        "allocated_bytes":scalar("PRAGMA page_size")?*scalar("PRAGMA page_count")?,
+        "free_bytes":scalar("PRAGMA page_size")?*scalar("PRAGMA freelist_count")?,
+        "tables":tables,
+        "physical_categories_bytes":categories,
+        "logical_body_bytes": {
+            "stored":scalar("SELECT coalesce(sum(length(CAST(content AS BLOB))),0) FROM contents")?,
+            "memory_versions":scalar("SELECT coalesce(sum(length(CAST(content AS BLOB))),0) FROM memory_rows")?,
+            "audit_references":scalar("SELECT coalesce(sum(length(CAST(b.content AS BLOB))),0)+coalesce(sum(length(CAST(a.content AS BLOB))),0) FROM change_rows r LEFT JOIN contents b ON b.id=r.before_content_id LEFT JOIN contents a ON a.id=r.after_content_id")?
+        }
+    }))
 }
 fn business_hash(path: &Path) -> Result<String> {
     let c = Connection::open(path)?;
@@ -42,6 +73,7 @@ fn business_hash(path: &Path) -> Result<String> {
     for table in [
         "nodes",
         "memories",
+        "contents",
         "edges",
         "paths",
         "node_attrs",
@@ -53,8 +85,13 @@ fn business_hash(path: &Path) -> Result<String> {
     ] {
         bytes.update(table.as_bytes());
         let order = if table == "paths" { "1,2,3" } else { "1" };
-        let mut stmt =
-            c.prepare(&format!("SELECT * FROM {table} ORDER BY {order}"))?;
+        // Include expanded bodies, not only immutable references, in audit/business checks.
+        let sql = match table {
+            "memories" => "SELECT * FROM memory_rows ORDER BY 1".to_string(),
+            "change_rows" => "SELECT r.*,b.content,a.content FROM change_rows r LEFT JOIN contents b ON b.id=r.before_content_id LEFT JOIN contents a ON a.id=r.after_content_id ORDER BY r.id".to_string(),
+            _ => format!("SELECT * FROM {table} ORDER BY {order}"),
+        };
+        let mut stmt = c.prepare(&sql)?;
         let columns = stmt.column_count();
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {

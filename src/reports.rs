@@ -44,10 +44,10 @@ pub fn diagnostic(
     c.execute_batch("BEGIN")?;
     let _guard = TransactionGuard::new(c);
     let mut q = c.prepare("SELECT p.domain,p.path,n.uuid,n.created_at,n.last_accessed_at,e.priority,m.id,m.content,
-        coalesce(n.last_accessed_at,max(coalesce(n.created_at,CURRENT_TIMESTAMP),coalesce((SELECT min(last_accessed_at) FROM nodes),CURRENT_TIMESTAMP))),
-        julianday('now')-julianday(coalesce(n.last_accessed_at,max(coalesce(n.created_at,CURRENT_TIMESTAMP),coalesce((SELECT min(last_accessed_at) FROM nodes),CURRENT_TIMESTAMP))))
+        coalesce(n.last_accessed_at,n.created_at,CURRENT_TIMESTAMP),
+        julianday('now')-julianday(coalesce(n.last_accessed_at,n.created_at,CURRENT_TIMESTAMP))
         FROM paths p JOIN nodes n ON n.uuid=p.node_uuid LEFT JOIN edges e ON e.id=p.edge_id
-        LEFT JOIN memories m ON m.node_uuid=n.uuid AND m.deprecated=0
+        LEFT JOIN memory_rows m ON m.node_uuid=n.uuid AND m.deprecated=0
         WHERE p.namespace=?1 AND (?2 IS NULL OR p.domain=?2) ORDER BY p.domain,p.path")?;
     let rows = q
         .query_map(params![ns, domain], |r| {
@@ -69,7 +69,7 @@ pub fn diagnostic(
         rows.iter().map(|r| (r.0.clone(), r.1.clone())).collect();
     let mut stale: BTreeMap<String, Value> = BTreeMap::new();
     let mut longest: BTreeMap<String, Value> = BTreeMap::new();
-    let mut orphans = Vec::new();
+    let mut broken_parent_routes = Vec::new();
     let mut aliases = AliasGroups::new();
     for (d, p, id, created, last, priority, mid, content, effective, age) in
         &rows
@@ -106,7 +106,7 @@ pub fn diagnostic(
             let snippet =
                 text.chars().take(50).collect::<String>().replace('\n', " ")
                     + if text.chars().count() > 50 { "..." } else { "" };
-            orphans.push(json!({"uuid":id,"uri":uri,"created_at":created,"last_accessed_at":last,"memory_id":mid,"snippet":snippet}));
+            broken_parent_routes.push(json!({"uuid":id,"uri":uri,"created_at":created,"last_accessed_at":last,"memory_id":mid,"snippet":snippet}));
         }
     }
     let mut duplicates:Vec<_>=aliases.into_iter().filter(|(_,(_,p))|p.len()>1).map(|((d,parent,id),(mid,p))|json!({"uuid":id,"memory_id":mid,"domain":d,"parent_path":parent,"count":p.len(),"paths":p})).collect();
@@ -119,7 +119,8 @@ pub fn diagnostic(
             .unwrap_or("")
             .to_owned()
     });
-    orphans.sort_by_key(|v| v["created_at"].as_str().unwrap_or("").to_owned());
+    broken_parent_routes
+        .sort_by_key(|v| v["created_at"].as_str().unwrap_or("").to_owned());
     let mut longest: Vec<_> = longest
         .into_values()
         .filter(|v| v["byte_size"].as_u64().unwrap() >= min_bytes)
@@ -143,7 +144,7 @@ pub fn diagnostic(
     }
     c.execute_batch("COMMIT")?;
     Ok(
-        json!({"stale_nodes":stale,"crowded_nodes":crowded,"orphaned_nodes":orphans,"duplicate_aliases":duplicates,"longest_memories":longest}),
+        json!({"stale_nodes":stale,"crowded_nodes":crowded,"broken_parent_routes":broken_parent_routes,"duplicate_aliases":duplicates,"longest_memories":longest}),
     )
 }
 
@@ -193,7 +194,7 @@ pub fn random(
     let mut q=c.prepare("SELECT n.uuid,coalesce(e.priority,2),p.domain||'://'||p.path,n.last_accessed_at,
         julianday('now')-julianday(coalesce(n.last_accessed_at,n.created_at,CURRENT_TIMESTAMP))
         FROM paths p JOIN edges e ON e.id=p.edge_id JOIN nodes n ON n.uuid=p.node_uuid
-        JOIN memories m ON m.node_uuid=n.uuid AND m.deprecated=0
+        JOIN memory_rows m ON m.node_uuid=n.uuid AND m.deprecated=0
         WHERE p.namespace=?1 AND n.uuid<>?3 AND ((?2 IS NOT NULL AND p.domain=?2) OR (?2 IS NULL AND p.domain<>'system')) ORDER BY n.uuid,coalesce(e.priority,2),p.domain,p.path")?;
     let rows = q
         .query_map(params![ns, domain, ROOT], |r| {

@@ -26,7 +26,7 @@ pub fn deprecated(
     c: &Connection, ns: &str, all_namespaces: bool,
 ) -> Result<Value> {
     transaction(c, false, || {
-        let mut q = c.prepare(&format!("SELECT m.id,m.node_uuid,length(CAST(m.content AS BLOB)),m.migrated_to,m.created_at FROM memories m WHERE m.deprecated=1 AND {VISIBLE} ORDER BY m.id DESC"))?;
+        let mut q = c.prepare(&format!("SELECT m.id,m.node_uuid,length(CAST(m.content AS BLOB)),m.migrated_to,m.created_at FROM memory_rows m WHERE m.deprecated=1 AND {VISIBLE} ORDER BY m.id DESC"))?;
         let rows = q
             .query_map(params![ns, all_namespaces], |r| {
                 Ok(json!({
@@ -79,9 +79,13 @@ pub fn purge(
 ) -> Result<Value> {
     transaction(c, apply, || {
         let (node, bytes, old, successor): (String,i64,bool,Option<i64>) = c.query_row(
-            &format!("SELECT m.node_uuid,length(CAST(m.content AS BLOB)),m.deprecated,m.migrated_to FROM memories m WHERE m.id=?3 AND {VISIBLE}"),
+            &format!("SELECT m.node_uuid,length(CAST(m.content AS BLOB)),m.deprecated,m.migrated_to FROM memory_rows m WHERE m.id=?3 AND {VISIBLE}"),
             params![ns,all_namespaces,memory_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))
-            .optional()?.ok_or_else(|| Error::NotFound("memory".into()))?;
+            .optional()?.ok_or_else(|| Error::NotFound(if all_namespaces {
+                format!("memory version {memory_id} not found across all namespaces")
+            } else {
+                format!("memory version {memory_id} not found in namespace {ns:?}")
+            }))?;
         if !old {
             return Err(Error::Invalid(
                 "only deprecated memories can be purged".into(),
@@ -94,11 +98,11 @@ pub fn purge(
         )?;
         if shared && !all_namespaces {
             return Err(Error::Conflict(
-                "shared node requires all_namespaces".into(),
+                "node is shared across namespaces; purge requires --all-namespaces".into(),
             ));
         }
         let mut q = c.prepare(
-            "SELECT id FROM memories WHERE migrated_to=?1 ORDER BY id",
+            "SELECT id FROM memory_rows WHERE migrated_to=?1 ORDER BY id",
         )?;
         let predecessors = q
             .query_map([memory_id], |r| r.get::<_, i64>(0))?
@@ -138,7 +142,7 @@ pub fn purge(
                     .unwrap_or(Value::Null),
             });
         }
-        let node_gc: bool = c.query_row("SELECT NOT EXISTS(SELECT 1 FROM memories WHERE node_uuid=?1 AND id<>?2) AND NOT EXISTS(SELECT 1 FROM paths WHERE node_uuid=?1)", params![node,memory_id], |r|r.get(0))?;
+        let node_gc: bool = c.query_row("SELECT NOT EXISTS(SELECT 1 FROM memory_rows WHERE node_uuid=?1 AND id<>?2) AND NOT EXISTS(SELECT 1 FROM paths WHERE node_uuid=?1)", params![node,memory_id], |r|r.get(0))?;
         let mut gc_nodes = BTreeSet::from([node.clone()]);
         let mut edge_count = 0i64;
         let mut keyword_count = 0i64;
@@ -174,10 +178,17 @@ pub fn purge(
                     gc_nodes.insert(child);
                 }
             }
-            let mut q = c.prepare("SELECT DISTINCT namespace FROM glossary_keywords WHERE node_uuid=?1 ORDER BY namespace")?;
-            keyword_namespaces = q
-                .query_map([&node], |r| r.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let mut q = c.prepare("SELECT namespace,keyword FROM glossary_keywords WHERE node_uuid=?1 ORDER BY namespace")?;
+            let mut cjk_namespaces = BTreeSet::new();
+            for row in q.query_map([&node], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })? {
+                let (kw_ns, kw) = row?;
+                if crate::search::is_cjk_dictionary_word(&kw) {
+                    cjk_namespaces.insert(kw_ns);
+                }
+            }
+            keyword_namespaces = cjk_namespaces.into_iter().collect();
             keyword_count = c.query_row(
                 "SELECT count(*) FROM glossary_keywords WHERE node_uuid=?1",
                 [&node],
@@ -200,9 +211,9 @@ pub fn purge(
             })
         };
         if audit.iter().any(|a| a.status == "pending" && relevant(a)) {
-            return Err(Error::Conflict(
-                "pending changes depend on this memory or node".into(),
-            ));
+            return Err(Error::Conflict(format!(
+                "cannot purge memory version {memory_id}: pending changes reference this version, its version chain, or related nodes"
+            )));
         }
         // Remove complete handled groups, including predecessor snapshots that could undo repair.
         let pruned: BTreeSet<_> = audit
@@ -241,7 +252,7 @@ pub fn purge(
         }
         for owner_node in owner_nodes {
             let unlinked_with_remaining: bool = c.query_row(
-                "SELECT NOT EXISTS(SELECT 1 FROM paths WHERE node_uuid=?1) AND EXISTS(SELECT 1 FROM memories WHERE node_uuid=?1 AND id<>?2)",
+                "SELECT NOT EXISTS(SELECT 1 FROM paths WHERE node_uuid=?1) AND EXISTS(SELECT 1 FROM memory_rows WHERE node_uuid=?1 AND id<>?2)",
                 params![owner_node,memory_id], |r|r.get(0))?;
             if !unlinked_with_remaining {
                 continue;
@@ -264,7 +275,7 @@ pub fn purge(
                 && latest_owner(false) != latest_owner(true)
             {
                 return Err(Error::Conflict(format!(
-                    "purge would change remaining orphan ownership for {owner_node}; delete older versions first and purge this version last"
+                    "purge would change the namespace ownership of remaining versions for node {owner_node} by removing their audit records"
                 )));
             }
         }
@@ -276,7 +287,7 @@ pub fn purge(
                 "SELECT EXISTS(SELECT 1 FROM glossary_keywords WHERE node_uuid=?1 AND namespace<>?2) OR EXISTS(SELECT 1 FROM memory_access_logs WHERE node_uuid=?1 AND namespace<>?2)",
                 params![node,ns], |r|r.get(0))?;
             if foreign_audit || foreign_gc {
-                return Err(Error::Conflict("purge affects another namespace's handled audit or node data; requires all_namespaces".into()));
+                return Err(Error::Conflict("purge affects another namespace's review history or node data; requires --all-namespaces".into()));
             }
         }
         let mut affected_nodes = BTreeSet::new();
@@ -313,9 +324,9 @@ pub fn purge(
                 })
             })
         {
-            return Err(Error::Conflict(
-                "handled audit groups have pending dependents".into(),
-            ));
+            return Err(Error::Conflict(format!(
+                "cannot purge memory version {memory_id}: the review history to be removed is linked to pending changes"
+            )));
         }
         let mut groups = Vec::new();
         let mut row_count = 0i64;
@@ -374,6 +385,9 @@ pub fn purge(
                     crate::search::rebuild(c, Some(namespace))?;
                 }
             }
+        }
+        if apply {
+            crate::content::collect(c)?;
         }
         Ok(
             json!({"memory_id":memory_id,"node_uuid":node,"bytes":bytes,"chain_repairs":repairs,

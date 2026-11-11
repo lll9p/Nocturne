@@ -31,18 +31,79 @@ pub struct Plan {
     skipped: Vec<Value>,
     issues: Vec<Value>,
     problem_sources: BTreeSet<PathBuf>,
+    source_path_attr: Option<String>,
 }
 
 impl Plan {
     pub fn preview(&self) -> Value {
-        json!({"source": self.source.to_string_lossy(), "into": self.into,
+        let mut preview = json!({"source": self.source.to_string_lossy(), "into": self.into,
             "valid": self.is_valid(), "issues": self.issues, "issue_count": self.issues.len(),
             "problem_source_count": self.problem_sources.len(),
             "mappings": self.entries.iter().map(|e| json!({
                 "source": e.source.to_string_lossy(), "uri": e.uri,
                 "kind": if e.directory { "directory" } else { "file" }
-            })).collect::<Vec<_>>(), "skipped": self.skipped})
+            })).collect::<Vec<_>>(), "skipped": self.skipped});
+        if let Some(key) = &self.source_path_attr {
+            preview["source_path_attr"] = json!(key);
+            for (mapping, entry) in preview["mappings"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .zip(&self.entries)
+            {
+                mapping["source_path"] = json!(self.relative_source(entry));
+            }
+        }
+        preview
     }
+
+    /// Preserve input-relative names without changing the shared attributes API.
+    pub fn with_source_path_attr(
+        mut self, key: &str, attrs: Option<&Value>,
+    ) -> Result<Self> {
+        if key.trim().is_empty() {
+            return Err(Error::Invalid(
+                "source path attribute key must not be empty".into(),
+            ));
+        }
+        self.source_path_attr = Some(key.into());
+        self.validate_attrs(attrs)?;
+        Ok(self)
+    }
+
+    pub fn warnings(&self, attrs: Option<&Value>) -> Vec<String> {
+        let mut value = attrs.cloned().unwrap_or_else(|| json!({}));
+        if let Some(key) = &self.source_path_attr {
+            value[key] = json!("");
+        }
+        crate::attrs::warnings(&value)
+    }
+
+    fn validate_attrs(&self, attrs: Option<&Value>) -> Result<()> {
+        if attrs.is_some_and(|value| !value.is_object()) {
+            return Err(Error::Invalid("attrs must be an object".into()));
+        }
+        if let Some(key) = &self.source_path_attr
+            && attrs.is_some_and(|value| value.get(key).is_some())
+        {
+            return Err(Error::Invalid(format!(
+                "source path attribute {key:?} already exists in shared attrs"
+            )));
+        }
+        Ok(())
+    }
+
+    fn relative_source(&self, entry: &Entry) -> String {
+        entry
+            .source
+            .strip_prefix(&self.source)
+            .unwrap()
+            .components()
+            .map(|component| component.as_os_str().to_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
     pub fn is_valid(&self) -> bool {
         self.issues.is_empty()
     }
@@ -75,7 +136,9 @@ impl Plan {
     }
 }
 
-fn validation_error(issues: &[Value], problem_source_count: usize) -> Error {
+pub(crate) fn validation_error(
+    issues: &[Value], problem_source_count: usize,
+) -> Error {
     let code = if issues.iter().any(|i| i["kind"] == "storage") {
         5
     } else if issues.iter().any(|i| i["kind"] == "conflict") {
@@ -85,10 +148,9 @@ fn validation_error(issues: &[Value], problem_source_count: usize) -> Error {
     };
     let samples: Vec<Value> = issues.iter().take(3).cloned().collect();
     let message = format!(
-        "import validation failed: issue_count={}, problem_source_count={}; samples={}",
+        "import validation failed: {} issue(s) in {} source(s)",
         issues.len(),
-        problem_source_count,
-        serde_json::json!(samples)
+        problem_source_count
     );
     Error::ImportValidation {
         code,
@@ -165,6 +227,7 @@ pub fn plan_with_sanitize(
         skipped: Vec::new(),
         issues: Vec::new(),
         problem_sources: BTreeSet::new(),
+        source_path_attr: None,
     };
     walk(directory, Some(&target.display()), &mut result, sanitize);
     let mut sources = BTreeMap::<String, Vec<PathBuf>>::new();
@@ -338,9 +401,7 @@ pub fn apply_with_metadata(
     if ns != plan.namespace {
         return Err(Error::Invalid("import plan namespace changed".into()));
     }
-    if attrs.is_some_and(|v| !v.is_object()) {
-        return Err(Error::Invalid("attrs must be an object".into()));
-    }
+    plan.validate_attrs(attrs)?;
     let parent = graph::resolve(c, ns, &plan.into)?;
     if parent != plan.parent_uuid {
         return Err(Error::Conflict(format!(
@@ -372,18 +433,20 @@ pub fn apply_with_metadata(
             priority,
             disclosure,
         )?;
-        if let Some(value) = attrs {
+        if let Some(key) = &plan.source_path_attr {
+            let mut value = attrs.cloned().unwrap_or_else(|| json!({}));
+            value[key] = json!(plan.relative_source(entry));
+            crate::attrs::set(c, ns, &entry.uri, &value)?;
+        } else if let Some(value) = attrs {
             crate::attrs::set(c, ns, &entry.uri, value)?;
         }
     }
     let directories = plan.entries.iter().filter(|e| e.directory).count();
     let mut result = json!({"imported": plan.entries.len(), "files": plan.entries.len() - directories,
         "directories": directories, "skipped": plan.skipped});
-    if let Some(attrs) = attrs {
-        let warnings = crate::attrs::warnings(attrs);
-        if !warnings.is_empty() {
-            result["warnings"] = json!(warnings);
-        }
+    let warnings = plan.warnings(attrs);
+    if !warnings.is_empty() {
+        result["warnings"] = json!(warnings);
     }
     Ok(result)
 }

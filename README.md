@@ -63,8 +63,8 @@ nocturne --db memory.db search '全文检索'
 nocturne --db memory.db --batch setup patch core://architecture --old '全文检索' --new 'jieba 分词全文检索'
 
 # 5. 查看待审阅记录、对比 setup 批次的净差异，并审阅接受
-nocturne --db memory.db review list
-nocturne --db memory.db review diff setup --batch
+nocturne --db memory.db review list --status pending
+nocturne --db memory.db review diff setup --by-batch
 nocturne --db memory.db review accept --all
 ```
 
@@ -75,14 +75,14 @@ nocturne --db memory.db review accept --all
 ## 核心概念与数据模型
 
 ### 1. 数据库路径与命名空间
-- **显式初始化**：除 `init` 外，任何命令都不会因路径拼写错误而自动创建数据库。
-- **定位顺序**：命令行参数 `--db <PATH>` 与 `--namespace <NAME>` 优先级最高；其次读取环境变量 `NOCTURNE_DB` 与 `NOCTURNE_NAMESPACE`。未指定 `--db` 时，默认使用平台用户数据目录（由 `directories::ProjectDirs` 为 `nocturne` 解析）下的 `memory.db`；未指定 `--namespace` 时，默认命名空间为空字符串 `""`。在自动化脚本中建议始终显式传入 `--db` 和 `--namespace`。
-- **全局参数位置**：`--db`、`--namespace`、`--json` 可放在子命令之前或之后；但用于写入归组的 `--batch <BATCH_ID>` **必须放在子命令之前**。
+- **显式路径与显式初始化**：除无需数据库的 `diff` 外，所有命令均须通过 `--db <PATH>` 或环境变量 `NOCTURNE_DB` 指定数据库路径（无隐式系统目录兜底）；除 `init` 外，任何命令都不会因路径拼写错误而自动创建数据库。
+- **定位顺序**：命令行参数 `--db <PATH>` 与 `--namespace <NAME>` 优先级高于环境变量 `NOCTURNE_DB` 与 `NOCTURNE_NAMESPACE`；未指定 `--namespace` 时默认为空字符串 `""`。在自动化脚本中建议始终显式传入 `--db` 和 `--namespace`。
+- **全局参数位置**：`--db`、`--namespace`、`--json` 与写入归组标签 `--batch <BATCH_ID>` 均为全局参数，放在子命令之前或之后均可生效。
 
 ### 2. 节点（Node）、路径（URI）与边属性（Edge Metadata）
 - **URI 与别名**：每条 URI（如 `core://architecture`）表示当前命名空间内的一条路径。域名（`domain`）与新建路径段均支持 Unicode 字母、数字、组合标记、`-` 和 `_`（不限于 ASCII，例如 `文献://水泥/阿利特`）。多条 URI（别名）可以指向同一个稳定的节点 UUID，共享同一份正文与节点 JSON 属性。
 - **边属性与节点属性分离**：
-  - **边属性（Edge Metadata）**：优先级 `priority`（整数 `0–999`，数值越小优先级越高）和披露说明 `disclosure` 绑定在图的**边**上，用来控制树形关系、检索排序和复习权重。
+  - **边属性（Edge Metadata）**：优先级 `priority`（整数 `0–999`，数值越小优先级越高）和披露说明 `disclosure` 绑定在图的**边**上，用来控制树形关系、检索排序和复习权重。显式创建的每条 `alias <SOURCE> <DESTINATION>` 拥有独立的边元数据，修改其 `priority`/`disclosure` 不会覆盖原路径（仅在对含子节点的父路径建立别名并自动派生后代路径时，派生子路径共享对应的子边）。
   - **节点属性（Node Attributes）**：通过 `attrs` 管理的 JSON 对象绑定在**节点**上，由指向该节点的所有别名共享。
 
 ### 3. 全库版本 ID（Database-wide Version ID）
@@ -109,14 +109,14 @@ nocturne --db memory.db create core:// --title 项目规范 --file spec.md --pri
 # 更新正文与边元数据（同一事务、同一 changeset 提交；省略 --file 时仅更新元数据且不生成新版本）
 nocturne --db memory.db update core://项目规范 --file spec_v2.md --priority 2 --disclosure '开发前必读'
 
-# 唯一文本块修补（支持 --old/--new 字面量或 --old-file/--new-file，不支持模糊/正则匹配）
+# 唯一字面文本块修补（支持 --old/--new 或 --old-file/--new-file，无通配/模糊/转义改写，前置校验 --expect-version）
 nocturne --db memory.db patch core://项目规范 --old-file old_part.md --new-file new_part.md
 
-# 乐观并发控制：传入 read 返回的当前实际版本号 <VERSION>，防止并发写入互相覆盖
+# 乐观并发控制：传入 read 返回的当前实际版本号 <VERSION>（update/patch/append/meta/attrs/alias/move/rename/unlink/trigger 均支持）
 nocturne --db memory.db update core://项目规范 --file spec_v3.md --expect-version <VERSION>
 
-# 追加正文与单独修改边元数据（将 disclosure 置为空字符串 '' 可清空显示文本）
-nocturne --db memory.db append core://项目规范 --stdin < extra.md
+# 追加正文与单独修改边元数据（将 disclosure 置为空字符串 '' 可清空显示文本；均返回更新后的完整节点）
+nocturne --db memory.db append core://项目规范 --file extra.md
 nocturne --db memory.db meta core://项目规范 --priority 1 --disclosure ''
 
 # 查看与编辑共享节点属性（--set 值始终按顶层字符串存储，不推断数字/布尔/嵌套结构）
@@ -124,7 +124,7 @@ nocturne --db memory.db attrs core://项目规范
 nocturne --db memory.db attrs core://项目规范 --set status=active --set owner=team --unset draft
 nocturne --db memory.db attrs core://项目规范 --file attrs.json
 
-# 管理触发关键词（支持单词与多词原子增删）
+# 管理触发关键词（add/remove/edit 均为幂等操作并返回统一结果；纯 CJK 词同步更新命名空间分词词典）
 nocturne --db memory.db trigger add core://项目规范 架构 规范
 nocturne --db memory.db trigger edit core://项目规范 --add 指南 --remove 规范
 nocturne --db memory.db trigger list core://项目规范
@@ -154,9 +154,23 @@ nocturne --db memory.db search --attr status=active --attr owner=team
 nocturne --db memory.db search '晶型' --contains --attr 'source=GB/T 21372'
 ```
 
-- **分词检索的语法边界**：在默认分词检索及 `--or` 模式下，查询按普通词语处理，不是布尔或 FTS 表达式语言；在多词查询中混入裸布尔运算符或 FTS 语法会返回输入无效错误（单独搜索运算符单词本身除外）。
+- **分词检索的字符集与语法边界**：默认分词检索及 `--or` 模式支持中文（`jieba` 分词）以及完整的 Unicode 字母、数字与组合标记（拉丁、希腊如 `β-C2S`、西里尔等，NFC 归一化与 `unicode61` 大小写/变音折叠）。查询按普通词语处理，不支持裸布尔运算符或原生 FTS 表达式语法。
 - **`--contains` 字面子串扫描**：默认 FTS 匹配 jieba 切分出的词元。当目标短词（如 `阿利特`）被切分在更长的复合词（如 `阿利特晶型`）内部时，可显式使用 `--contains`。它将整个查询字符串直接作为字面子串，扫描活动正文、URI、disclosure 与当前命名空间触发词（不解析分词或布尔语法，`%` 和 `_` 视为字面字符，ASCII 大小写不敏感）。这是显式扫描模式，**不是全文搜索的自动回退，也不会建立单字索引**；不可与 `--or` 同用。
 - **属性过滤规则**：`--attr KEY=VALUE` 仅精确匹配节点 JSON 的顶层字符串字段；键名中的 `.` 视为字面字符而非 JSON 路径，不支持匹配数字、布尔值、数组或嵌套对象，属性内容也不进入全文索引。
+
+#### 搜索范围与精确计数
+
+普通文本输出会说明当前页和是否还有结果；默认只多查看一个去重节点，不为显示总数遍历全部命中。需要精确计数时使用：
+
+```sh
+nocturne --db memory.db --json search '矿化剂' --with-total --limit 5
+# 只计数，不加载结果正文或生成摘要
+nocturne --db memory.db --json search '矿化剂' --with-total --limit 0
+```
+
+`--with-total` 的 JSON 为 `{ "total": 40, "offset": 0, "limit": 5, "has_more": true, "results": [...] }`（数字仅为示例）；不带该参数的 JSON 仍是结果数组。`total` 是当前 namespace、domain、属性和查询条件下按节点去重的精确命中数，别名不重复计数，计数与当前页使用同一读快照。越界页仍返回总数；只计数时 `results` 为空，`has_more` 表示 offset 后是否仍有匹配节点。
+
+精确计数需遍历全部匹配候选，`--contains` 还需文本扫描；只为返回页加载结果正文和生成摘要。计数表示**本次查询的规模，不是研究问题的召回率**，不同查询的计数可能重叠。探索“有哪些方法”时应换检索方向、读原文并交代缺口，不要把第一页相关结果当成全貌；日常定位不必计算总数。
 
 浏览与历史版本命令（`<VERSION>` 请替换为 `history` 返回的实际全库版本 ID）：
 
@@ -170,8 +184,8 @@ nocturne --db memory.db recent --limit 10
 nocturne --db memory.db history core://项目规范
 nocturne --db memory.db restore core://项目规范 <VERSION>
 
-# 分页索引与有界树形浏览（tree 限制后代深度与后代总数，安全硬上限为深度 128、后代 10,000）
-nocturne --db memory.db index --domain core --limit 100 --offset 0
+# 分页索引（支持 --with-total 计数信封）与有界树形浏览（安全硬上限为深度 128、后代 10,000）
+nocturne --db memory.db index --domain core --limit 100 --offset 0 --with-total
 nocturne --db memory.db tree core:// --depth 2 --limit 200
 
 # 发现命名空间与列出不加载正文的路径清单
@@ -183,22 +197,22 @@ nocturne --db memory.db paths --all-namespaces
 ### 变更审查、批次与回滚（Review & Rollback）
 
 ```sh
-# 将多次独立写入归入同一审阅批次（全局 --batch 必须放在子命令前）
+# 将多次独立写入归入同一审阅批次（全局 --batch <BATCH_ID> 可放在子命令前或后）
 nocturne --db memory.db --batch refactor-notes create core:// --title part1 --file p1.md
-nocturne --db memory.db --batch refactor-notes update core://项目规范 --file spec_v2.md
+nocturne --db memory.db update core://项目规范 --file spec_v2.md --batch refactor-notes
 
-# 查看批次净差异并按批次整体回滚（review 后的 --batch 表示按批次名查找；单条操作则传入 review list 中的 UUID）
-nocturne --db memory.db review list
-nocturne --db memory.db review diff refactor-notes --batch
-nocturne --db memory.db review rollback refactor-notes --batch
+# 筛选待审阅记录、查看批次净差异并按批次整体回滚（--by-batch 表示按批次名查找；不加则传入 changeset UUID）
+nocturne --db memory.db review list --status pending --limit 20
+nocturne --db memory.db review diff refactor-notes --by-batch
+nocturne --db memory.db review rollback refactor-notes --by-batch
 
 # 接受当前命名空间所有待审阅变更（加 --all-namespaces 可扩至全库）
 nocturne --db memory.db review accept --all
 ```
 
-- **区分两个 `--batch`**：
-  - 子命令前的全局 `--batch <BATCH_ID>`：为当次写入打上批次标签，作用域为当前命名空间。**它仅用于审阅归组，不会把多个进程或多次命令合并为同一个数据库写事务**。
-  - `review diff/rollback <ID> --batch`：布尔开关，指示 `review` 将 `<ID>` 解析为批次名而非单条 changeset UUID。批次 diff 按节点 UUID 配对，直接对比批次开始前与结束后的净正文差异，不展示中间过渡版本（`--json` 仍保留完整行快照数组）。
+- **`--batch <BATCH_ID>` 与 `--by-batch`**：
+  - 全局 `--batch <BATCH_ID>`：为当次写入打上命名空间级审阅批次标签。**它仅用于审阅归组，不会把多个进程或多次命令合并为同一个数据库写事务**。
+  - `review diff/accept/rollback <ID> --by-batch`：布尔开关，指示 `review` 将 `<ID>` 解析为批次名而非单条 changeset UUID。批次 diff 按节点 UUID 配对，直接对比批次开始前与结束后的净正文差异，不展示中间过渡版本（`--json` 仍保留完整行快照数组）。
 - **回滚冲突保护（无强制覆盖）**：若目标变更之后存在后续冲突编辑，或节点仍被其他存活路径/跨命名空间引用，回滚会**整体中止并返回冲突错误（退出码 `4`，`reason: "rollback_conflict"`）**，绝不覆盖后续修改，也不会只回滚批次的一部分。系统**不提供 `--force` 绕过机制**；请先按需撤销后续 changeset（错误 JSON 中的 `blocking_uris`、`related_changesets`、`foreign_references` 会指出当前命名空间可见的阻塞项，同时隐藏其他命名空间的私有详情），或从一开始就将关联写入放入同一批次。普通的 `read` 访问记录不会阻碍回滚。
 
 ### 路径管理、别名与无路径节点（Orphans）
@@ -208,8 +222,8 @@ nocturne --db memory.db review accept --all
 nocturne --db memory.db rename core://项目规范 架构规范
 nocturne --db memory.db move core://架构规范 archive://架构规范
 
-# 为同一节点添加别名路径，或移除单条路径
-nocturne --db memory.db alias add notes://规范 archive://架构规范 --priority 2
+# 为同一节点添加带独立边元数据的别名路径（alias <SOURCE> <DESTINATION>），或移除单条路径
+nocturne --db memory.db alias archive://架构规范 notes://规范 --priority 2
 nocturne --db memory.db unlink notes://规范
 
 # 发现、查看并恢复在所有命名空间均已无路径的节点（<MEMORY_ID> 取自 orphans list 输出）
@@ -218,7 +232,7 @@ nocturne --db memory.db orphans show <MEMORY_ID>
 nocturne --db memory.db orphans restore <MEMORY_ID> core://recovered_spec --priority 1
 ```
 
-- `rename` 与 `move` 仅移动当前命名空间下实际存在的 URI 子树，操作前会预检循环引用与路径碰撞；所有预设中属于当前命名空间的 `boot` 引用会同步重写，同时保持其他命名空间的回退配置不变。
+- `rename` 与 `move` 仅移动当前命名空间下实际存在的 URI 子树，操作前会预检循环引用与路径碰撞；所有预设中属于当前命名空间的 `boot` 引用会同步重写，不影响其他命名空间的配置。
 - `orphans` 仅针对**在任何命名空间都没有路径**的节点（仍有路径节点的旧版本请用 `history` 或 `deprecated` 查看）。出于命名空间隐私隔离，默认仅列出最后一次路径移除记录属于当前命名空间的节点；若需检查或恢复无审计来源的导入孤儿节点，或有意跨命名空间恢复，请显式加上 `--all-namespaces`。
 
 ### 目录批量导入与可读导出
@@ -230,19 +244,32 @@ nocturne --db memory.db import-dir ./notes --into core:// --sanitize --priority 
 # 在单个可回滚事务中执行目录导入
 nocturne --db memory.db --batch import-notes import-dir ./notes --into core:// --sanitize --priority 1 --attrs-file attrs.json
 
-# 将当前命名空间导出为可读 Markdown 目录树
+# 导出整个命名空间；也可在 export-dir 后传 lit:// 或 lit://docs 缩小范围
 nocturne --db memory.db export-dir --output ./readable-export
+
+# 导出单个分支，并附带属性、边配置及共享关系的 manifest
+nocturne --db memory.db export-dir lit://docs --output ./docs-export --with-metadata
+
+# 在新库中预检并恢复快照（保留 URI，写入当前 namespace）
+nocturne --db restored.db init
+nocturne --db restored.db import-dir ./docs-export --manifest ./docs-export/nocturne-manifest.json --dry-run
+nocturne --db restored.db import-dir ./docs-export --manifest ./docs-export/nocturne-manifest.json
 ```
 
 - **`import-dir`**：递归导入 UTF-8 `.md` 和 `.txt` 文件（目录生成空正文节点，跳过并报告隐藏项、符号链接与其他文件类型，`README` 无特殊待遇）。`--sanitize` 保留合法 Unicode 名称字符和原有的 `-`/`_`，将连续的其他字符（空格、点、标点、括号、引号、符号等）替换为 `-`，并仅修剪由替换产生的首尾 `-`（保留原有的合法 `-`/`_`）。**导入绝不覆盖或合并已有路径或清理后产生的碰撞**；只要存在任何无效项或冲突，实际导入即整体拒绝（返回问题计数与最多 3 条样本，完整列表通过 `--dry-run --json` 查看）。
-- **`export-dir` 的定位与限制**：在同一只读快照中将当前命名空间导出为 `domain/path.md`（不记录访问或产生 changeset），先写入同级临时目录再原子发布，绝不覆盖已有目标。注意：**`export-dir` 是便于阅读、分享或 Git diff 的正文快照，不是无损备份，也不承诺能通过 `import-dir` 原样往返导入**——历史版本、审计快照、节点属性、边元数据及别名共享关系不会导出；且有正文的父节点会同时导出为 `parent.md` 和 `parent/`，再次导入时会被视为重复 URI 拒绝。无损保存请使用 `backup`。
+- **来源路径**：普通导入可加 `--source-path-attr source_path`，在同一事务内为每个新文件和目录写入顶层字符串属性，保存相对输入根的原始路径（含文件扩展名，分隔符为 `/`），无需逐条写回。该路径是本次输入的名称，不是外部预处理前的名称；不保存机器绝对路径，不修改正文。不传选项时行为不变。字段名不能为空，也不能与 `--attrs-file` 中已有字段重名（包括 `null`）；预览显示字段名和每项来源路径。该选项与 `--manifest` 互斥，manifest 往返会保留已有来源属性。
+- **`export-dir [URI]`**：省略 URI 时导出当前命名空间；`lit://` 选择整个域，`lit://docs` 选择该路径及其后代，按路径段边界匹配，不扩散到其他别名或命名空间。在同一只读快照中逐篇写出 `domain/path.md`，保留正文原字节，先写同级临时目录再原子发布，不覆盖已有目标，不记录访问或产生 changeset。
+- **`--with-metadata`**：额外生成 `nocturne-manifest.json`，保存选中范围的 URI、节点属性、边的 priority/disclosure 及共享关系。配套的 `import-dir --manifest <FILE>` 预检文件引用、元数据和目标路径后，在单个可回滚事务中恢复，分配新的数据库 ID。空正文目录节点的属性也保留；`parent.md` 和 `parent/` 通过 manifest 对应到同一节点。导出根之外的父路径需在目标库中预先存在。
+- **manifest 导入**：保留原 URI，使用当前 `--namespace`；不与 `--into`、`--sanitize`、`--priority`、`--disclosure`、`--attrs-file` 或 `--source-path-attr` 混用。manifest 及其引用文件必须位于导出目录内，禁止越界路径或符号链接。普通目录导入仍按文件布局命名，不自动读取 manifest。
+- **快照范围**：带 manifest 的导出用于当前内容和元数据交换；历史版本、审计、触发词和启动预设由整库 `backup` 保存。普通无 manifest 导出仅含正文与目录结构；有正文的父节点再次普通导入时仍会产生同名冲突。
 
 ### 启动记忆（Boot）与预设（Preset）
 
 ```sh
-# 配置并读取当前命名空间的启动记忆
+# 配置并读取当前命名空间的启动记忆（--no-track 只读加载，不更新访问时间或写日志）
 nocturne --db memory.db boot set core://architecture
 nocturne --db memory.db boot list
+nocturne --db memory.db boot --no-track
 nocturne --db memory.db boot
 
 # 管理全库命名的启动预设（boot.json 形如 {"": ["core://agent"], "work": ["core://spec"]}）
@@ -254,7 +281,7 @@ nocturne --db memory.db preset activate writing
 ```
 
 - 预设是全库共享的启动 URI 映射表（不是访问控制或记忆副本），最多一个处于激活状态，变更均可审计、可回滚。
-- 执行 `boot` 时读取活动预设中当前命名空间的条目（仅当该命名空间键不存在时回退到 `""` 条目；显式配置为空数组 `[]` 则禁止回退）。若任何配置的 URI 缺失，stdout 仍输出完整的 `loaded`/`failed` 报告并以退出码 `3` 结束。
+- 执行 `boot` 时仅读取活动预设中当前 `--namespace` 对应的条目（绝不跨 `""` 命名空间静默回退）。若任何配置的 URI 缺失，`stdout` 输出完整的 `loaded`/`failed` 报告，`stderr` 输出 `not_found` 错误 JSON，并以退出码 `3` 结束。
 
 ---
 
@@ -270,7 +297,7 @@ nocturne --db memory.db diagnostic --domain core --days-stale 30 --max-children 
 nocturne --db memory.db random --domain core --no-track
 ```
 
-- **过期阈值规则**：`priority` 为 `0`、`1`、`2`、`3` 的记忆分别在 `3`、`7`、`14`、`28` 天未访问后标记为过期，此后优先级每加 1 阈值翻倍（上限 36,500 天）。缺失优先级或 **`priority = 999` 表示回退使用 `--days-stale`（默认 30 天），而不是“永不过期”**。
+- **过期阈值规则**：节点按 `coalesce(last_accessed_at, created_at)` 计算未访问天数；`priority` 为 `0`、`1`、`2`、`3` 的记忆分别在 `3`、`7`、`14`、`28` 天未访问后标记为过期，此后优先级每加 1 阈值翻倍（上限 36,500 天）。缺失优先级或 **`priority = 999` 表示回退使用 `--days-stale`（默认 30 天），而不是“永不过期”**。结果包含 `stale_nodes`、`crowded_nodes`、`broken_parent_routes`（缺失直接父路径的子路由，区别于无路径的 `orphans`）、`duplicate_aliases` 与 `longest_memories`。
 - **分域治理建议**：可将整理后的核心知识与原始文献放在同一命名空间的不同域（如 `core://` 与 `lit://`），检索时在当前命名空间内跨两个域搜索，治理时用 `diagnostic --domain core` 仅检查核心域，无需为了隐藏过期提醒而把所有文献的优先级调大（调大优先级会同时降低 `random` 抽样权重：`max(unvisited_days, 0.5) * max(0.5^priority, 1e-12)`）。
 
 ### 废弃版本清理（Purge）与日志清理（不可逆操作）
@@ -309,7 +336,9 @@ nocturne --db memory.db doctor
 nocturne diff --old-file old.txt --new-file new.txt
 ```
 
-- **`stats`**：始终报告全库范围的只读统计（不受 `--namespace` 限制），不会清理任何日志、历史或空闲页。
+- **`stats`**：始终报告全库范围的只读统计（不受 `--namespace` 限制）。文本大小按 UTF-8 字节计，存储占用按 SQLite 页计；节点数排除 ROOT，无路径节点的大小包含所有保留版本。普通输出只展示统计结果，计量口径见 `stats --help`，JSON 保留 `semantics` 字段。统计不执行清理，也不估算删除后可回收的空间。
+- **共享正文存储**：`stats.contents` 区分实际存储、仅审计引用和无引用正文的数量与字节；`doctor` 会报告无引用残留。正文存放在不可变的内容表中，由版本和审计快照共同引用；检索通过关联读取正文，不再保存一份完整搜索正文。审查输出按需还原完整正文，接受或回滚审查不会自动丢弃其引用内容。数据库格式以根 `Cargo.toml` 为准；旧格式仍需保留对应的旧版程序使用，新版不会自动转换。
+
 - **`vacuum`**：依次执行 WAL checkpoint、`VACUUM` 物理压缩与二次 checkpoint，回收空闲页以缩小数据库文件，不删除任何历史版本或审计记录。运行前请停止其他并发读写进程，并预留约数据库大小两倍的临时磁盘空间（若 checkpoint 被并发连接阻塞会报 `conflict`）。
 
 ### 备份与恢复安全规程
@@ -328,17 +357,17 @@ nocturne --db memory.backup.db doctor
 
 ## 自动化、输出格式与退出码
 
-- **输出流约定**：默认输出便于人类阅读的文本；传入 `--json` 时，成功结果以单个 JSON 值（非 JSONL）写入 `stdout`。无论是否指定 `--json`，**所有错误始终以结构化 JSON 写入 `stderr`**（包含稳定的 `code` 字段，以及冲突场景下的细分 `reason`），并返回非零退出码。
-- **特殊报告约定**：`import-dir --dry-run` 的校验失败报告以及 `doctor` 的完整性检查报告均属于结构化诊断结果，输出在 `stdout`（而非 `stderr`），同时通过退出码标识状态。
-- **自动化调用建议**：脚本与 Agent 调用时请始终传入 `--json`、显式指定 `--db` 与 `--namespace`，并**先检查退出码再解析 `stdout`**。
+- **输出流约定**：默认输出便于人类阅读的文本；传入 `--json` 时，成功结果以单个 JSON 值（非 JSONL）写入 `stdout`。无论是否指定 `--json`，**任何非零退出（1–5）始终向 `stderr` 写入结构化 `{"error": ...}` JSON**（包含稳定的 `code` 字段，以及冲突场景下的细分 `reason`）。
+- **诊断报告共存约定**：`doctor`（退出码 `1`）、`import-dir --dry-run` 发现校验问题（退出码 `2`/`4`/`5`）以及 `boot` 存在缺失 URI（退出码 `3`）在向 `stderr` 写入错误摘要 JSON 的同时，仍向 `stdout` 输出完整的诊断/预检报告。
+- **自动化调用建议**：脚本与 Agent 调用时请始终传入 `--json`、显式指定 `--db` 与 `--namespace`，并**先检查退出码**：非零退出即可直接从 `stderr` 读取错误 JSON，诊断命令还可从 `stdout` 读取完整报告。
 
 | 退出码 | 错误码 / 场景 | 含义说明 |
 | :---: | :--- | :--- |
 | `0` | — | 执行成功 |
-| `1` | `doctor` 完整性告警 | `doctor` 发现数据或索引不一致（诊断报告仍在 `stdout`） |
-| `2` | `invalid` | 参数、URI、非 UTF-8 输入无效，或 `import-dir --dry-run` 发现校验问题（报告在 `stdout`） |
-| `3` | `not_found` | 所选命名空间中未找到目标，或 `boot` 存在加载失败的引用（报告在 `stdout`） |
-| `4` | `conflict` | 状态或并发冲突：版本不匹配（`reason: "version_mismatch"`）、补丁无匹配或多匹配（`patch_no_match` / `patch_ambiguous`）、回滚冲突（`rollback_conflict`）等 |
+| `1` | `integrity` | `doctor` 发现数据或索引不一致（完整报告在 `stdout`，错误摘要在 `stderr`） |
+| `2` | `invalid` | 参数、缺失 `--db`、URI、非 UTF-8 输入无效，或 `import-dir --dry-run` 发现输入校验问题 |
+| `3` | `not_found` | 所选命名空间中未找到目标，或 `boot` 存在加载失败的引用（`loaded`/`failed` 报告仍在 `stdout`） |
+| `4` | `conflict` | 状态或并发冲突：`version_mismatch`、`patch_no_match`、`patch_ambiguous`、`rollback_conflict`、路径占用或导入碰撞等 |
 | `5` | `storage` | 底层 SQLite 存储错误或真实文件系统 I/O 失败（含 `import-dir --dry-run` 遇到真实文件 I/O 错误） |
 
 ---

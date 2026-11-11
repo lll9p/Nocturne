@@ -128,7 +128,7 @@ impl Store {
     }
     fn unsupported_format() -> Error {
         Error::Invalid(format!(
-            "unsupported database format; create a new database with nocturne {} (existing data is not upgraded or cleared)",
+            "unsupported database format; create a new database with nocturne {} (schema {SCHEMA_VERSION}; existing data is not upgraded or cleared)",
             env!("CARGO_PKG_VERSION")
         ))
     }
@@ -158,9 +158,7 @@ impl Store {
             self.conn
                 .execute("INSERT INTO audit_context VALUES(?1)", [&id])?;
             let mut value = f(&self.conn)?;
-            if crate::changes::diff(&self.conn, namespace, &id, false)?
-                .as_array()
-                .is_some_and(|rows| rows.is_empty())
+            if !crate::changes::has_changes(&self.conn, namespace, &id, false)?
             {
                 self.conn.execute_batch("ROLLBACK")?;
                 if !value.is_object() {
@@ -179,7 +177,32 @@ impl Store {
             if !nodes.is_empty() {
                 crate::search::refresh(&self.conn, &nodes)?;
             }
-            if self.conn.query_row("SELECT count(*) FROM change_rows WHERE changeset_id=?1 AND table_name='glossary_keywords'",[&id],|r|r.get::<_,i64>(0))?>0{crate::search::rebuild(&self.conn,Some(namespace))?;}
+            let mut kw_q = self.conn.prepare(
+                "SELECT json_extract(before_row,'$.keyword'),json_extract(after_row,'$.keyword')
+                 FROM change_rows WHERE changeset_id=?1 AND table_name='glossary_keywords'",
+            )?;
+            let mut retokenize = false;
+            for pair in kw_q.query_map([&id], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ))
+            })? {
+                let (before, after) = pair?;
+                if before
+                    .as_deref()
+                    .is_some_and(crate::search::is_cjk_dictionary_word)
+                    || after
+                        .as_deref()
+                        .is_some_and(crate::search::is_cjk_dictionary_word)
+                {
+                    retokenize = true;
+                    break;
+                }
+            }
+            if retokenize {
+                crate::search::rebuild(&self.conn, Some(namespace))?;
+            }
             if let Some(obj) = value.as_object_mut() {
                 obj.insert("change_id".into(), serde_json::json!(id));
             } else {

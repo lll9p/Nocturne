@@ -42,27 +42,102 @@ pub fn index_page(
     c: &Connection, ns: &str, domain: Option<&str>, limit: Option<usize>,
     offset: usize,
 ) -> Result<Value> {
-    let Ok(offset) = i64::try_from(offset) else {
-        return Ok(json!([]));
+    let mut page = index_page_with_info(c, ns, domain, limit, offset, false)?;
+    Ok(page.get_mut("results").unwrap().take())
+}
+
+pub fn index_page_with_info(
+    c: &Connection, ns: &str, domain: Option<&str>, limit: Option<usize>,
+    offset: usize, with_total: bool,
+) -> Result<Value> {
+    let offset_i64 = i64::try_from(offset).map_err(|_| {
+        Error::Invalid("Index offset exceeds SQLite integer range".into())
+    })?;
+    let limit_i64 = match limit {
+        Some(v) => Some(i64::try_from(v).map_err(|_| {
+            Error::Invalid("Index limit exceeds SQLite integer range".into())
+        })?),
+        None => None,
     };
-    let limit = limit
-        .map(|v| i64::try_from(v).unwrap_or(i64::MAX))
-        .unwrap_or(-1);
-    let mut q = c.prepare(
-        "SELECT p.domain,p.path,p.node_uuid,e.priority,e.disclosure,coalesce(substr(CAST(m.content AS BLOB),1,404),x'') FROM paths p
-        JOIN edges e ON e.id=p.edge_id AND e.child_uuid=p.node_uuid
-        JOIN memories m ON m.node_uuid=p.node_uuid AND m.deprecated=0
-        WHERE p.namespace=?1 AND (?2 IS NULL OR p.domain=?2) ORDER BY p.domain,p.path LIMIT ?3 OFFSET ?4",
-    )?;
-    let rows = q
-        .query_map(params![ns, domain, limit, offset], |r| {
-            Ok(json!({
-        "uri":format!("{}://{}",r.get::<_,String>(0)?,r.get::<_,String>(1)?),
-        "node_uuid":r.get::<_,String>(2)?,"priority":r.get::<_,i64>(3)?,
-        "disclosure":r.get::<_,Option<String>>(4)?,"snippet":blob_snippet(r.get::<_,Vec<u8>>(5)?)}))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(json!(rows))
+    c.execute_batch("SAVEPOINT index_page_snapshot")?;
+    let result = (|| -> Result<Value> {
+        let total_opt = if with_total {
+            let count: i64 = c.query_row(
+                "SELECT count(*) FROM paths p
+                JOIN edges e ON e.id=p.edge_id AND e.child_uuid=p.node_uuid
+                JOIN memory_rows m ON m.node_uuid=p.node_uuid AND m.deprecated=0
+                WHERE p.namespace=?1 AND (?2 IS NULL OR p.domain=?2)",
+                params![ns, domain],
+                |r| r.get(0),
+            )?;
+            Some(count as usize)
+        } else {
+            None
+        };
+        if limit == Some(0) {
+            let has_more = if let Some(total) = total_opt {
+                offset < total
+            } else {
+                c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM paths p
+                    JOIN edges e ON e.id=p.edge_id AND e.child_uuid=p.node_uuid
+                    JOIN memory_rows m ON m.node_uuid=p.node_uuid AND m.deprecated=0
+                    WHERE p.namespace=?1 AND (?2 IS NULL OR p.domain=?2)
+                    ORDER BY p.domain,p.path LIMIT 1 OFFSET ?3)",
+                    params![ns, domain, offset_i64],
+                    |r| r.get(0),
+                )?
+            };
+            return Ok(json!({
+                "total": total_opt,
+                "offset": offset,
+                "limit": limit,
+                "has_more": has_more,
+                "results": [],
+            }));
+        }
+        let query_limit = match limit_i64 {
+            Some(v) => v.saturating_add(1),
+            None => -1,
+        };
+        let mut q = c.prepare(
+            "SELECT p.domain,p.path,p.node_uuid,e.priority,e.disclosure,coalesce(substr(CAST(m.content AS BLOB),1,404),x'') FROM paths p
+            JOIN edges e ON e.id=p.edge_id AND e.child_uuid=p.node_uuid
+            JOIN memory_rows m ON m.node_uuid=p.node_uuid AND m.deprecated=0
+            WHERE p.namespace=?1 AND (?2 IS NULL OR p.domain=?2) ORDER BY p.domain,p.path LIMIT ?3 OFFSET ?4",
+        )?;
+        let mut rows = q
+            .query_map(params![ns, domain, query_limit, offset_i64], |r| {
+                Ok(json!({
+                    "uri":format!("{}://{}",r.get::<_,String>(0)?,r.get::<_,String>(1)?),
+                    "node_uuid":r.get::<_,String>(2)?,"priority":r.get::<_,i64>(3)?,
+                    "disclosure":r.get::<_,Option<String>>(4)?,"snippet":blob_snippet(r.get::<_,Vec<u8>>(5)?)
+                }))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let has_more = limit.is_some_and(|lim| rows.len() > lim);
+        if let Some(lim) = limit {
+            rows.truncate(lim);
+        }
+        let total = total_opt.or_else(|| {
+            if !has_more && (!rows.is_empty() || offset == 0) {
+                Some(offset + rows.len())
+            } else {
+                None
+            }
+        });
+        Ok(json!({
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "has_more": has_more,
+            "results": rows,
+        }))
+    })();
+    let released = c.execute_batch("RELEASE index_page_snapshot");
+    let value = result?;
+    released?;
+    Ok(value)
 }
 
 fn child_rows(
@@ -72,7 +147,7 @@ fn child_rows(
     let mut q = c.prepare(
         "SELECT e.id,e.child_uuid,e.name,e.priority,e.disclosure,p.domain,p.path,m.content
         FROM edges e JOIN paths p ON p.edge_id=e.id AND p.node_uuid=e.child_uuid AND p.namespace=?2
-        JOIN memories m ON m.node_uuid=e.child_uuid AND m.deprecated=0
+        JOIN memory_rows m ON m.node_uuid=e.child_uuid AND m.deprecated=0
         WHERE e.parent_uuid=?1 AND (?1<>?3 OR (p.domain=?4 AND instr(p.path,'/')=0))
         ORDER BY e.priority,e.name,p.domain,p.path,e.id",
     )?;
@@ -122,7 +197,7 @@ fn tree_rows(
                 (p.domain=?4 AND p.path=CASE WHEN ?5='' THEN e.name ELSE ?5||'/'||e.name END) DESC,
                 p.domain,p.path) AS rank
             FROM edges e JOIN paths p ON p.edge_id=e.id AND p.node_uuid=e.child_uuid AND p.namespace=?2
-            JOIN memories m ON m.node_uuid=e.child_uuid AND m.deprecated=0
+            JOIN memory_rows m ON m.node_uuid=e.child_uuid AND m.deprecated=0
             WHERE e.parent_uuid=?1 AND (?1<>?3 OR (p.domain=?4 AND instr(p.path,'/')=0))
         ) SELECT child_uuid,name,priority,disclosure,domain,path FROM ranked WHERE rank=1
         ORDER BY priority,name,domain,path,id LIMIT ?6",
@@ -252,11 +327,7 @@ pub fn boot_uris(c: &Connection, ns: &str) -> Result<Value> {
     let Some((_, map)) = configured(c, false)? else {
         return Ok(json!([]));
     };
-    let value = map
-        .get(ns)
-        .or_else(|| map.get(""))
-        .cloned()
-        .unwrap_or(json!([]));
+    let value = map.get(ns).cloned().unwrap_or(json!([]));
     let uris: Vec<String> = serde_json::from_value(value)?;
     Ok(json!(uris))
 }
@@ -283,11 +354,17 @@ pub fn set_boot(c: &Connection, ns: &str, uris: &[String]) -> Result<Value> {
 }
 
 pub fn boot(c: &Connection, ns: &str) -> Result<Value> {
+    boot_with_tracking(c, ns, true)
+}
+
+pub fn boot_with_tracking(
+    c: &Connection, ns: &str, track: bool,
+) -> Result<Value> {
     let uris: Vec<String> = serde_json::from_value(boot_uris(c, ns)?)?;
     let mut loaded = Vec::new();
     let mut failed = Vec::new();
     for uri in uris {
-        match graph::read(c, ns, &uri, true) {
+        match graph::read(c, ns, &uri, track) {
             Ok(value) => loaded.push(value),
             Err(Error::NotFound(message)) => {
                 failed.push(json!({"uri":uri,"error":message}))

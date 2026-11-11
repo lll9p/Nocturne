@@ -29,7 +29,7 @@ pub enum Error {
         foreign_references: bool,
     },
     #[error(
-        "version conflict for {uri} in namespace {namespace:?}: expected {expected}, current {current}; use the version returned by read"
+        "version conflict for {uri} in namespace {namespace:?}: expected {expected}, current {current}; re-read current content and reconcile your edit before retrying"
     )]
     VersionConflict {
         uri: String,

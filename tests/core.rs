@@ -15,7 +15,7 @@ fn shared_parent_alias_does_not_export_private_children() {
     })
     .unwrap();
     s.write("a", None, |c| {
-        graph::alias(c, "a", "notes://parent", "core://parent")
+        graph::alias(c, "a", "core://parent", "notes://parent")
     })
     .unwrap();
     assert!(
@@ -26,6 +26,69 @@ fn shared_parent_alias_does_not_export_private_children() {
         graph::read(s.connection(), "b", "core://parent/private", false)
             .is_ok()
     );
+}
+
+// Top-level and sibling aliases must own independent edges so metadata edits never bleed across routes.
+#[test]
+fn aliases_isolate_edge_metadata_across_domains_and_siblings() {
+    let s = Store::memory().unwrap();
+    s.write("a", None, |c| {
+        graph::create(
+            c,
+            "a",
+            "core://",
+            "session-policy",
+            "idle expiry is 30m",
+            1,
+            Some("When changing session expiry"),
+        )
+    })
+    .unwrap();
+    s.write("a", None, |c| {
+        graph::alias_with_meta(
+            c,
+            "a",
+            "core://session-policy",
+            "notes://session-policy",
+            Some(4),
+            Some("When investigating login renewal"),
+        )?;
+        graph::alias_with_meta(
+            c,
+            "a",
+            "core://session-policy",
+            "core://login-renewal",
+            Some(7),
+            Some("When debugging token refresh"),
+        )
+    })
+    .unwrap();
+    s.write("a", None, |c| {
+        graph::edit(
+            c,
+            "a",
+            "notes://session-policy",
+            None,
+            Some(9),
+            Some("Updated notes disclosure"),
+            None,
+        )
+    })
+    .unwrap();
+    let c = s.connection();
+    let primary = graph::read(c, "a", "core://session-policy", false).unwrap();
+    let cross_domain =
+        graph::read(c, "a", "notes://session-policy", false).unwrap();
+    let sibling = graph::read(c, "a", "core://login-renewal", false).unwrap();
+    assert_eq!(primary["node_uuid"], cross_domain["node_uuid"]);
+    assert_eq!(primary["node_uuid"], sibling["node_uuid"]);
+    assert_eq!(primary["priority"], 1);
+    assert_eq!(primary["disclosure"], "When changing session expiry");
+    assert_eq!(cross_domain["priority"], 9);
+    assert_eq!(cross_domain["disclosure"], "Updated notes disclosure");
+    assert_eq!(sibling["priority"], 7);
+    assert_eq!(sibling["disclosure"], "When debugging token refresh");
+    assert_eq!(nocturne::maintenance::doctor(c).unwrap()["ok"], true);
 }
 
 // Prevent same-named batches from leaking foreign review data or accepting and undoing another namespace's writes.

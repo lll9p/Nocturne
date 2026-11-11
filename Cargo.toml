@@ -20,7 +20,7 @@ include = [
 ]
 
 [package.metadata.nocturne]
-schema-version = 1
+schema-version = 3
 
 [[bin]]
 name = "nocturne"
@@ -29,7 +29,6 @@ path = "src/main.rs"
 [dependencies]
 aho-corasick = "1.1.5"
 clap = { version = "4.6.7", features = ["derive", "env"] }
-directories = "6.0.0"
 jieba-rs = "0.11.0"
 rusqlite.workspace = true
 serde_json.workspace = true

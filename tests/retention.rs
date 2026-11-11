@@ -136,6 +136,7 @@ fn snapshot(s: &Store) -> Vec<String> {
     for table in [
         "nodes",
         "memories",
+        "contents",
         "edges",
         "paths",
         "glossary_keywords",
@@ -183,7 +184,11 @@ fn orphan_owner_preserved_until_final_version_gc() {
             let err =
                 retention::purge(c, "a", latest_id, all, apply).unwrap_err();
             assert!(matches!(err, Error::Conflict(_)));
-            assert!(err.to_string().contains("older versions first"));
+            assert!(err.to_string().contains("namespace ownership"));
+            assert!(
+                err.to_string()
+                    .contains(first["node_uuid"].as_str().unwrap())
+            );
             assert_eq!(before, snapshot(&s));
         }
     }
@@ -266,4 +271,118 @@ fn joint_unlink_audit_preserves_other_orphan_ownership() {
             .is_empty()
     );
     assert_eq!(maintenance::doctor(c).unwrap()["ok"], true);
+}
+
+// Rolling back a version removes its business row, not the review's body reference.
+#[test]
+fn rolled_back_body_survives_unrelated_purge() {
+    let s = Store::memory().unwrap();
+    create(&s);
+    let changed = s
+        .write("a", None, |c| {
+            graph::update(c, "a", "core://one", "rollback body", None)
+        })
+        .unwrap();
+    let c = s.connection();
+    let change_id = changed["change_id"].as_str().unwrap();
+    let diff = changes::diff(c, "a", change_id, false).unwrap();
+    assert!(!diff.to_string().contains("content_id"));
+    assert!(c.execute("UPDATE contents SET content='mutated' WHERE content='rollback body'", []).is_err());
+    changes::rollback(c, "a", change_id, false).unwrap();
+    assert!(
+        c.execute("DELETE FROM contents WHERE content='rollback body'", [])
+            .is_err()
+    );
+    assert_eq!(changes::diff(c, "a", change_id, false).unwrap(), diff);
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM contents WHERE content='rollback body'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM memories WHERE id=?1",
+            [changed["version"].as_i64().unwrap()],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    let other = s
+        .write("a", None, |c| {
+            graph::create(c, "a", "core://", "two", "purge body", 0, None)
+        })
+        .unwrap();
+    s.write("a", None, |c| graph::unlink(c, "a", "core://two"))
+        .unwrap();
+    c.execute(
+        "UPDATE changesets SET status='accepted' WHERE status='pending'",
+        [],
+    )
+    .unwrap();
+    retention::purge(c, "a", other["version"].as_i64().unwrap(), false, true)
+        .unwrap();
+    assert_eq!(changes::diff(c, "a", change_id, false).unwrap(), diff);
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM contents WHERE content='purge body'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    // Unrelated collection must preserve the rolled-back review's body.
+    assert_eq!(maintenance::doctor(c).unwrap()["ok"], true);
+    let baseline = nocturne::stats::stats(c).unwrap()["contents"].clone();
+    assert_eq!(baseline["stored"]["rows"], 2);
+    assert_eq!(
+        baseline["stored"]["content_bytes"],
+        "secret first".len() + "rollback body".len()
+    );
+    assert_eq!(
+        baseline["audit_only"],
+        serde_json::json!({"rows":1,"content_bytes":"rollback body".len()})
+    );
+    assert_eq!(
+        baseline["unreferenced"],
+        serde_json::json!({"rows":0,"content_bytes":0})
+    );
+    let orphan = "孤立\0body";
+    c.execute("INSERT INTO contents(content) VALUES(?1)", [orphan])
+        .unwrap();
+    let orphan_id = c.last_insert_rowid();
+    let diagnosis = maintenance::doctor(c).unwrap();
+    assert_eq!(diagnosis["ok"], false);
+    assert!(
+        diagnosis["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["check"] == "unreferenced_contents"
+                && issue["count"] == 1)
+    );
+    let observed = nocturne::stats::stats(c).unwrap()["contents"].clone();
+    assert_eq!(observed["stored"]["rows"], 3);
+    assert_eq!(
+        observed["stored"]["content_bytes"].as_u64().unwrap(),
+        baseline["stored"]["content_bytes"].as_u64().unwrap()
+            + orphan.len() as u64
+    );
+    assert_eq!(
+        observed["unreferenced"],
+        serde_json::json!({"rows":1,"content_bytes":orphan.len()})
+    );
+    assert_eq!(observed["audit_only"], baseline["audit_only"]);
+    // Doctor reports only; explicit cleanup leaves the audit-only reference intact.
+    c.execute("DELETE FROM contents WHERE id=?1", [orphan_id])
+        .unwrap();
+    assert_eq!(maintenance::doctor(c).unwrap()["ok"], true);
+    assert_eq!(nocturne::stats::stats(c).unwrap()["contents"], baseline);
+    assert_eq!(changes::diff(c, "a", change_id, false).unwrap(), diff);
+    assert_eq!(c.query_row("SELECT count(*) FROM contents b WHERE NOT EXISTS(SELECT 1 FROM memories m WHERE m.content_id=b.id) AND NOT EXISTS(SELECT 1 FROM change_rows r WHERE r.before_content_id=b.id OR r.after_content_id=b.id)", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
 }

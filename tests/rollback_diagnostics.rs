@@ -16,6 +16,7 @@ fn snapshot(s: &Store) -> Value {
         "nodes",
         "node_attrs",
         "memories",
+        "contents",
         "edges",
         "paths",
         "changesets",
@@ -71,10 +72,7 @@ fn foreign_references_remain_private() {
     };
     assert_eq!(snapshot(&s), before);
     assert_eq!(maintenance::doctor(s.connection()).unwrap()["ok"], true);
-    assert!(
-        message.contains("undo subsequent changes first"),
-        "{message}"
-    );
+    assert!(message.contains("blocking URI: core://one"), "{message}");
     assert!(message.contains("another namespace"));
     assert_eq!(
         details,

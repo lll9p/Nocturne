@@ -139,8 +139,8 @@ fn conflicting_batch_rollback_does_not_partially_revert_other_members() {
     }
     s.ok(&["update", "core://first", "--file", s.body.to_str().unwrap()]);
     assert_eq!(
-        failure(s.run(&["review", "rollback", "atomic-review", "--batch"]))["error"]
-            ["code"],
+        failure(s.run(&["review", "rollback", "atomic-review", "--by-batch"]))
+            ["error"]["code"],
         "conflict"
     );
     assert_eq!(
@@ -213,6 +213,7 @@ fn transaction_table_counts(db: &Path) -> Vec<(&'static str, i64)> {
         "paths",
         "edges",
         "memories",
+        "contents",
         "changesets",
         "change_rows",
         "audit_context",

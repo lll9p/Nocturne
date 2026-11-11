@@ -1,93 +1,51 @@
 # Symptom-selected audit playbooks
 
-Read only the relevant sections. Every section produces a proposal first, not
-permission to change data. Use the command syntax in [cli-audit.md](cli-audit.md).
+Load only the section matching the observed symptom. Every playbook produces an evidence-backed proposal first, never unilateral edits. Command syntax lives in [cli-audit.md](cli-audit.md).
 
 ## Conflicts and prior calibration
 
-1. Read both claims, their supporting cases, relevant parents, and history.
-2. State the apparent contradiction precisely, with URIs and evidence dates.
+1. Read both nodes, their supporting examples, relevant parents, and `history`.
+2. State the exact conflict with URIs, `version` IDs, and event/source dates.
 3. Separate verified observations from generalizations, preferences, and hypotheses.
-4. Test whether scope or time differences explain it. If not, preserve the real
-   conflict rather than asserting that both claims are somehow true.
-5. A reliable counterexample can refute an absolute claim without establishing
-   its opposite. Propose a narrower boundary or an unresolved question when warranted.
-6. Identify dependent conclusions that need review, without assuming all descendants
-   are invalid. Preserve facts even if the interpretation they supported is rejected.
-
-For a single outdated prior, state its original conditions, what changed, and what
-future decision would differ. Do not rewrite simply to echo the latest feedback.
-Report uncertainty when source reliability or temporal ordering cannot be established.
+4. Test whether environment, version, or chronology explains the divergence. If a genuine contradiction remains, keep it explicit instead of inventing a false synthesis.
+5. One verified counterexample refutes a universal rule without proving the opposite universal; propose a narrower scope condition or an explicit open question.
+6. Flag downstream nodes that rely on the superseded assumption while preserving verified underlying facts.
 
 ## Evidence and value
 
-Ask what decision the body informs and what evidence gives it that role.
-Check quotations, event dates, provenance, outcomes, and the mechanism behind advice.
-Label unsupported explanations; avoid replacing them with another confident story.
-A missing recent access is not proof of irrelevance, falsity, or expiration.
-Reference material, historical evidence, and rare safety procedures may deserve retention.
+Judge against the collection's purpose:
+- **Source archive:** verify UTF-8 fidelity and provenance mappings (`attrs` / `source_path`); do not demand summarizing raw sources.
+- **Curated knowledge:** check whether target questions are answered with applicability conditions, method comparisons, visible disagreements, and passage locators, and note unprocessed sources.
 
-Recommend retaining coherent source records, narrowing unsupported interpretations,
-or collecting a specific missing observation. Where text seems redundant, compare
-unique facts and ownership before suggesting consolidation. “No behavioral value”
-is an audit hypothesis, not authorization for unlink or permanent deletion.
+Ask what concrete decision each curated claim informs and what evidence supports its causal explanation. Lack of recent access (`stale_nodes`) is a prompt to check currency, not proof that reference data or rare failure procedures are worthless. Propose narrowing unsupported claims, gathering a missing observation, or consolidating true duplicates—never treating “low recent access” as automatic permission to unlink or purge.
 
 ## Repeated failures and duplication
 
-1. List incident URIs and actual event times; find any earlier attempted remedy.
-2. Verify whether the remedy existed before each later incident. Created/edited
-   timestamps alone may not establish when the underlying events occurred.
-3. Reconstruct the retrieval path before the repeated action: what parent would be
-   opened, what disclosure would be visible, and which triggers could be encountered?
-4. Distinguish a remedy that was never retrieved, advice that was retrieved but
-   ambiguous, an incorrect remedy, and an unrelated failure with similar wording.
-   Do not infer any of these without evidence; list competing explanations if needed.
-5. Suggest a causal repair: an alias at the real entry path, an observable disclosure,
-   a precise technical procedure, or a revised claim supported by the incident evidence.
-
-Do not manufacture personality diagnoses from repeated technical mistakes.
-Do not write another generic “remember next time” summary when the useful lesson
-already exists but its trigger path is missing. Propose a concrete replay test:
-from the pre-error context, can a reader reach the right advice before acting?
-
-Compare duplicate candidates by node UUID first. Two paths to one UUID are aliases,
-not duplicate bodies needing consolidation. For separate nodes, preserve unique
-supporting incidents, source ownership, and independent update requirements.
-A shared maintained lesson may suit an alias; independent or divergent claims may not.
-Consolidation proposals should identify exactly which facts survive and where.
+1. Compare incident chronology against when the existing note or remedy was written (do not confuse database `created_at` with incident dates).
+2. Reconstruct the pre-action lookup path: which parent, `boot` list, `disclosure`, or `search` / `trigger` query would an agent naturally hit before acting?
+3. Distinguish four root causes: (a) advice was unreachable from the pre-action context, (b) advice was retrieved but too vague, (c) the remedy itself was wrong, or (d) the new failure had a different mechanism.
+4. Propose a targeted causal fix—an `alias SOURCE DESTINATION` at the natural entry parent, an observable `disclosure`, a `trigger` synonym, or a corrected technical procedure—plus a replay query to test it. Do not add generic “be careful next time” summaries or personality commentary.
+5. Check `node_uuid` first when evaluating duplicates: two URIs sharing one `node_uuid` are already aliases, not duplicate bodies. Consolidate separate nodes only when they share one maintenance lifecycle, preserving distinct incident evidence.
 
 ## Retrieval topology
 
-Start from the actual input or imminent action, not an ideal taxonomy.
-Inspect the parents a reader would naturally visit and the disclosure shown there.
-A disclosure should describe when to read, not just summarize the body.
-Prefer observable signals such as “Before retrying a deployment after timeout”
-over “When I realize I am making a mistake.” Provide proposed wording in the report.
+Start from realistic user questions or impending engineering actions within scope:
 
-Check lexical triggers for useful cross-domain associations and false positives.
-A noisy term may need narrowing or removal, but only after authorization.
-Use aliases for multiple entry points to the same maintained content. Check which
-routes share an `edge_id` before proposing context-specific disclosure and priority;
-changing shared edge metadata affects all its routes. Explain shared-body consequences.
-Do not clone text merely to place it under another parent.
-
-Priority is relative retrieval ordering and affects sampling/staleness signals.
-Do not tune it solely to silence diagnostics. No universal priority quota or child
-count cap applies. A busy parent warrants investigation only when its actual
-retrieval cost or relevance is poor. Use atomic move/rename for relocation.
+1. Replay representative questions with bounded `search` and natural `children` / `tree` navigation (`read --no-track`), deduplicating by `node_uuid`.
+2. Record where discovery fails rather than treating empty `disclosure` or `trigger` fields on raw literature as defects. Audit curated decision nodes separately from archival sources.
+3. Propose repairs only for observed discovery gaps:
+   - **Disclosure:** phrase as an observable trigger (“Before retrying a timed-out deployment”), not a topic label.
+   - **Triggers:** bind verified domain synonyms (batch multiple CJK terms in one `trigger edit` call; remove noisy false-positive terms only with approval).
+   - **Aliases & moves:** add `alias SOURCE DESTINATION` when two entry contexts need the same maintained body with context-specific edge `priority` / `disclosure` (check `paths --node <UUID>` only if editing auto-derived child edges). Use atomic `move` / `rename` to relocate misplaced subtrees.
+   - **Broken parent routes:** if `diagnostic` reports `broken_parent_routes`, inspect whether the missing intermediate container should be created or the subpath moved.
+4. After approved repairs, replay the representative questions and report actual reachability and remaining gaps.
 
 ## Decomposition
 
-Read the whole body. Ask whether parts have genuinely different retrieval contexts,
-sources, or update lifecycles. Length alone does not justify splitting.
-Compare the cost of reading a coherent reference with the cost of multiple lookups.
+Distinguish **chapter navigation** (making sections of a long reference addressable) from **knowledge synthesis** (answering cross-source questions). Length alone never mandates splitting; weigh single-read coherence against multi-lookup overhead.
 
-If splitting is justified, propose concept boundaries, target paths, disclosures,
-and the supporting facts each result retains. Preserve independently useful parent
-content when it serves ordinary cases; a navigational index may also be intentional,
-so do not impose a universal ban or generate hollow parents just to tidy the tree.
-Ensure each proposed result is understandable without hidden conversational context.
+When users repeatedly need specific sections of a large work:
+- **Lightweight index:** keep the intact source node and add a navigational node with section headings and locators.
+- **Selective chapter nodes:** extract high-traffic chapters as child nodes citing the intact original URI, keeping the full source preserved unless authorized otherwise. Remember that multiple excerpts from one work share provenance and do not count as independent corroboration.
 
-A plan to split is not permission to create, rewrite, unlink, or purge nodes.
-Validate the proposed retrieval flow before asking for approval, then read back
-all approved results and compare against the evidence-preservation plan.
+When a curated node mixes genuinely independent concepts or update lifecycles, propose exact split boundaries, target URIs, disclosures, and which facts stay in each node so every resulting record stands on its own.

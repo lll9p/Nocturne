@@ -29,10 +29,20 @@ pub fn run(h: &Harness) -> Result<Value> {
         first["version"]
     )));
     assert!(!human.contains("children:\n  children:"));
-    let reviews = r!("review", "list");
+    let reviews = r!("review", "list", "--status", "pending");
     assert_eq!(reviews[0]["id"], first["change_id"]);
     assert!(!reviews[0]["created_at"].as_str().unwrap().is_empty());
-    r!("alias", "add", "notes://agent", "core://agent");
+    r!(
+        "alias",
+        "core://agent",
+        "notes://agent",
+        "--priority",
+        "2",
+        "--disclosure",
+        "alias route"
+    );
+    assert_eq!(r!("read", "core://agent", "--no-track")["priority"], 0);
+    assert_eq!(r!("read", "notes://agent", "--no-track")["priority"], 2);
     r!("trigger", "add", "core://agent", "记忆架构");
     assert_eq!(
         r!("search", "记忆架构 GraphService")[0]["node_uuid"],
@@ -85,6 +95,10 @@ pub fn run(h: &Harness) -> Result<Value> {
         original
     );
     r!("boot", "set", "core://agent");
+    assert_eq!(
+        r!("boot", "--no-track")["loaded"].as_array().unwrap().len(),
+        1
+    );
     assert_eq!(r!("boot")["loaded"].as_array().unwrap().len(), 1);
     let renamed = r!("rename", "core://agent", "assistant");
     assert_eq!(r!("boot", "list"), json!(["core://assistant"]));
@@ -121,8 +135,12 @@ pub fn run(h: &Harness) -> Result<Value> {
             let node = format!("portable-fixture-{i}");
             tx.execute("INSERT INTO nodes(uuid) VALUES(?)", [&node])?;
             tx.execute(
-                "INSERT INTO memories(node_uuid,content) VALUES(?,?)",
-                [node.clone(), format!("中文基准记忆 {i} isolated_entry_{i}")],
+                "INSERT INTO contents(content) VALUES(?)",
+                [format!("中文基准记忆 {i} isolated_entry_{i}")],
+            )?;
+            tx.execute(
+                "INSERT INTO memories(node_uuid,content_id) VALUES(?,?)",
+                rusqlite::params![node, tx.last_insert_rowid()],
             )?;
             tx.execute(
                 "INSERT INTO edges(parent_uuid,child_uuid,name) VALUES(?,?,?)",
@@ -183,7 +201,7 @@ pub fn run(h: &Harness) -> Result<Value> {
         "--priority",
         "4"
     );
-    w!(" gamma"; "append","core://agent","--stdin","--disclosure","compound");
+    w!(" gamma"; "append","core://agent","--file","-","--disclosure","compound");
     assert_eq!(
         r!("read", "core://agent", "--no-track")["content"],
         "portable beta gamma"
@@ -253,7 +271,7 @@ pub fn run(h: &Harness) -> Result<Value> {
     let attrs = h.path("attrs.json");
     fs::write(&attrs, r#"{"source":"paper","tags":["math"]}"#)?;
     let unicode = w!("unicode_probe"; "create","知识://","--title","向量","--file","-","--attrs-file",text(&attrs));
-    r!("alias", "add", "笔记://别名", "知识://向量");
+    r!("alias", "知识://向量", "笔记://别名");
     let reduced = r!("read", "笔记://别名", "--no-track", "--no-children");
     assert!(reduced.get("children").is_none());
     assert_eq!(reduced["attrs"]["source"], "paper");
@@ -296,17 +314,21 @@ pub fn run(h: &Harness) -> Result<Value> {
     ] {
         fs::write(messy.join(name), body)?;
     }
-    let invalid = h
-        .ns(
+    let invalid_raw = h
+        .raw(
             db,
             "",
             &["import-dir", text(&messy), "--into", "知识://", "--dry-run"],
             None,
+            true,
             2,
         )?
         .0;
+    let invalid: Value = serde_json::from_slice(&invalid_raw.stdout)?;
+    let invalid_err: Value = serde_json::from_slice(&invalid_raw.stderr)?;
     assert_eq!(invalid["valid"], false);
     assert_eq!(invalid["problem_source_count"], 3);
+    assert_eq!(invalid_err["error"]["code"], "invalid");
     let sanitized = r!(
         "import-dir",
         text(&messy),
@@ -339,7 +361,7 @@ pub fn run(h: &Harness) -> Result<Value> {
     assert_eq!(node["priority"], 2);
     assert_eq!(node["disclosure"], "imported");
     assert_eq!(node["attrs"], json!({"priority":1,"disclosure":"custom"}));
-    r!("review", "rollback", "sanitized", "--batch");
+    r!("review", "rollback", "sanitized", "--by-batch");
     assert_eq!(r!("doctor")["ok"], true);
     let short = w!("阿利特晶型受氧化镁影响"; "create","测试://","--title","中文","--file","-");
     for query in ["阿利特", "晶型"] {
@@ -398,6 +420,7 @@ pub fn run(h: &Harness) -> Result<Value> {
     assert_eq!(r!("review", "list"), before);
     assert_eq!(r!("doctor")["ok"], true);
     batch(h, &attrs, &mut timings)?;
+    manifest_roundtrip(h)?;
     let mut report = h.report()?;
     report["portable_smoke"] = json!("passed");
     report["timing_dataset"] =
@@ -483,6 +506,10 @@ fn batch(
     );
     let routes = r!("index", "--domain", "知识");
     assert_eq!(
+        r!("index", "--domain", "知识", "--with-total", "--limit", "0")["total"],
+        59
+    );
+    assert_eq!(
         r!(
             "index", "--domain", "知识", "--limit", "10", "--offset", "10"
         ),
@@ -505,12 +532,95 @@ fn batch(
         "paper"
     );
     assert_eq!(r!("doctor")["ok"], true);
-    r!("review", "rollback", "batch59", "--batch");
+    r!("review", "rollback", "batch59", "--by-batch");
     assert_eq!(r!("paths"), json!([]));
     assert_eq!(r!("stats")["node_attrs"]["rows"], 0);
     assert_eq!(r!("doctor")["ok"], true);
     let reviews = r!("review", "list");
     assert_eq!(r!("vacuum")["ok"], true);
     assert_eq!(r!("review", "list"), reviews);
+    Ok(())
+}
+
+fn manifest_roundtrip(h: &Harness) -> Result<()> {
+    let source = "manifest-source.db";
+    let target = "manifest-target.db";
+    for db in [source, target] {
+        h.run(db, &["init"], None)?;
+    }
+    let ns = "roundtrip";
+    for (parent, title, body) in [
+        ("notes://", "selected", "root body\r\n"),
+        ("notes://selected", "child", "中文 child body"),
+        ("notes://", "excluded", "not selected"),
+    ] {
+        h.ns(
+            source,
+            ns,
+            &[
+                "create",
+                parent,
+                "--title",
+                title,
+                "--file",
+                "-",
+                "--priority",
+                "3",
+                "--disclosure",
+                "roundtrip",
+            ],
+            Some(body),
+            0,
+        )?;
+    }
+    let output = h.path("manifest-subtree");
+    let before = h.ns(source, ns, &["review", "list"], None, 0)?.0;
+    h.ns(
+        source,
+        ns,
+        &[
+            "export-dir",
+            "notes://selected",
+            "--output",
+            text(&output),
+            "--with-metadata",
+        ],
+        None,
+        0,
+    )?;
+    assert_eq!(h.ns(source, ns, &["review", "list"], None, 0)?.0, before);
+    let manifest = output.join("nocturne-manifest.json");
+    assert!(manifest.is_file());
+    let args = ["import-dir", text(&output), "--manifest", text(&manifest)];
+    let mut preview = args.to_vec();
+    preview.push("--dry-run");
+    assert_eq!(h.ns(target, ns, &preview, None, 0)?.0["valid"], true);
+    assert_eq!(h.ns(target, ns, &args, None, 0)?.0["imported"], 2);
+    for uri in ["notes://selected", "notes://selected/child"] {
+        let read = ["read", uri, "--no-track"];
+        let original = h.ns(source, ns, &read, None, 0)?.0;
+        let restored = h.ns(target, ns, &read, None, 0)?.0;
+        for field in ["content", "priority", "disclosure", "attrs"] {
+            assert_eq!(restored[field], original[field], "{uri}: {field}");
+        }
+    }
+    let c = rusqlite::Connection::open(h.path(target))?;
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM paths WHERE namespace=?",
+            [ns],
+            |r| r.get::<_, i64>(0)
+        )?,
+        2
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM paths WHERE namespace=''",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?,
+        0
+    );
+    assert_eq!(h.run(target, &["doctor"], None)?.0["ok"], true);
     Ok(())
 }

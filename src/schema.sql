@@ -1,23 +1,33 @@
 -- Fresh schema. Initialized atomically by Store.
 CREATE TABLE nodes(uuid TEXT PRIMARY KEY,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,last_accessed_at TEXT);
-CREATE TABLE memories(id INTEGER PRIMARY KEY AUTOINCREMENT,node_uuid TEXT NOT NULL REFERENCES nodes(uuid),content TEXT NOT NULL,deprecated INTEGER NOT NULL DEFAULT 0,migrated_to INTEGER REFERENCES memories(id) DEFERRABLE INITIALLY DEFERRED,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE contents(id INTEGER PRIMARY KEY AUTOINCREMENT,content TEXT NOT NULL);
+CREATE TRIGGER contents_immutable BEFORE UPDATE ON contents BEGIN SELECT RAISE(ABORT,'content is immutable'); END;
+CREATE TABLE memories(id INTEGER PRIMARY KEY AUTOINCREMENT,node_uuid TEXT NOT NULL REFERENCES nodes(uuid),content_id INTEGER NOT NULL REFERENCES contents(id),deprecated INTEGER NOT NULL DEFAULT 0,migrated_to INTEGER REFERENCES memories(id) DEFERRABLE INITIALLY DEFERRED,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE VIEW memory_rows AS SELECT m.id,m.node_uuid,c.content,m.deprecated,m.migrated_to,m.created_at FROM memories m JOIN contents c ON c.id=m.content_id;
+CREATE INDEX memory_content ON memories(content_id);
 CREATE UNIQUE INDEX active_memory ON memories(node_uuid) WHERE deprecated=0;
-CREATE TABLE edges(id INTEGER PRIMARY KEY AUTOINCREMENT,parent_uuid TEXT NOT NULL REFERENCES nodes(uuid),child_uuid TEXT NOT NULL REFERENCES nodes(uuid),name TEXT NOT NULL,priority INTEGER NOT NULL DEFAULT 0,disclosure TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(parent_uuid,child_uuid));
+CREATE TABLE edges(id INTEGER PRIMARY KEY AUTOINCREMENT,parent_uuid TEXT NOT NULL REFERENCES nodes(uuid),child_uuid TEXT NOT NULL REFERENCES nodes(uuid),name TEXT NOT NULL,priority INTEGER NOT NULL DEFAULT 0,disclosure TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX ix_edges_parent_child ON edges(parent_uuid,child_uuid);
+CREATE INDEX ix_edges_child ON edges(child_uuid);
 CREATE TABLE paths(namespace TEXT NOT NULL DEFAULT '',domain TEXT NOT NULL,path TEXT NOT NULL,edge_id INTEGER NOT NULL REFERENCES edges(id),node_uuid TEXT NOT NULL REFERENCES nodes(uuid),created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(namespace,domain,path));
 CREATE TABLE glossary_keywords(id INTEGER PRIMARY KEY AUTOINCREMENT,keyword TEXT NOT NULL,node_uuid TEXT NOT NULL REFERENCES nodes(uuid),namespace TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(keyword,node_uuid,namespace));
 CREATE TABLE memory_access_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,node_uuid TEXT NOT NULL REFERENCES nodes(uuid),namespace TEXT NOT NULL DEFAULT '',accessed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,context TEXT);
 CREATE TABLE presets(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,boot_uris TEXT NOT NULL DEFAULT '{}',path_masks TEXT DEFAULT NULL,is_active INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE UNIQUE INDEX active_preset ON presets(is_active) WHERE is_active=1;
 CREATE TABLE changesets(id TEXT PRIMARY KEY,batch TEXT,namespace TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE change_rows(id INTEGER PRIMARY KEY AUTOINCREMENT,changeset_id TEXT NOT NULL REFERENCES changesets(id),table_name TEXT NOT NULL,before_row TEXT,after_row TEXT);
+CREATE TABLE change_rows(id INTEGER PRIMARY KEY AUTOINCREMENT,changeset_id TEXT NOT NULL REFERENCES changesets(id),table_name TEXT NOT NULL,before_row TEXT,after_row TEXT,
+ before_content_id INTEGER GENERATED ALWAYS AS (CASE WHEN table_name='memories' THEN json_extract(before_row,'$.content_id') END) STORED REFERENCES contents(id),
+ after_content_id INTEGER GENERATED ALWAYS AS (CASE WHEN table_name='memories' THEN json_extract(after_row,'$.content_id') END) STORED REFERENCES contents(id));
+CREATE INDEX audit_before_content ON change_rows(before_content_id);
+CREATE INDEX audit_after_content ON change_rows(after_content_id);
 CREATE TABLE audit_context(id TEXT);
 INSERT INTO nodes(uuid) VALUES('00000000-0000-0000-0000-000000000000');
 CREATE TRIGGER audit_nodes_INSERT AFTER INSERT ON nodes WHEN (SELECT id FROM audit_context LIMIT 1) IS NOT NULL BEGIN INSERT INTO change_rows(changeset_id,table_name,before_row,after_row) SELECT id,'nodes',NULL,json_object('uuid',NEW.uuid,'created_at',NEW.created_at) FROM audit_context; END;
 CREATE TRIGGER audit_nodes_UPDATE AFTER UPDATE ON nodes WHEN (OLD.uuid IS NOT NEW.uuid OR OLD.created_at IS NOT NEW.created_at) AND (SELECT id FROM audit_context LIMIT 1) IS NOT NULL BEGIN INSERT INTO change_rows(changeset_id,table_name,before_row,after_row) SELECT id,'nodes',json_object('uuid',OLD.uuid,'created_at',OLD.created_at),json_object('uuid',NEW.uuid,'created_at',NEW.created_at) FROM audit_context; END;
 CREATE TRIGGER audit_nodes_DELETE AFTER DELETE ON nodes WHEN (SELECT id FROM audit_context LIMIT 1) IS NOT NULL BEGIN INSERT INTO change_rows(changeset_id,table_name,before_row,after_row) SELECT id,'nodes',json_object('uuid',OLD.uuid,'created_at',OLD.created_at),NULL FROM audit_context; END;
-CREATE TRIGGER audit_memories_INSERT AFTER INSERT ON memories WHEN (SELECT id FROM audit_context LIMIT 1) IS NOT NULL BEGIN INSERT INTO change_rows(changeset_id,table_name,before_row,after_row) SELECT id,'memories',NULL,json_object('id',NEW.id,'node_uuid',NEW.node_uuid,'content',NEW.content,'deprecated',NEW.deprecated,'migrated_to',NEW.migrated_to,'created_at',NEW.created_at) FROM audit_context; END;
-CREATE TRIGGER audit_memories_UPDATE AFTER UPDATE ON memories WHEN (SELECT id FROM audit_context LIMIT 1) IS NOT NULL BEGIN INSERT INTO change_rows(changeset_id,table_name,before_row,after_row) SELECT id,'memories',json_object('id',OLD.id,'node_uuid',OLD.node_uuid,'content',OLD.content,'deprecated',OLD.deprecated,'migrated_to',OLD.migrated_to,'created_at',OLD.created_at),json_object('id',NEW.id,'node_uuid',NEW.node_uuid,'content',NEW.content,'deprecated',NEW.deprecated,'migrated_to',NEW.migrated_to,'created_at',NEW.created_at) FROM audit_context; END;
-CREATE TRIGGER audit_memories_DELETE AFTER DELETE ON memories WHEN (SELECT id FROM audit_context LIMIT 1) IS NOT NULL BEGIN INSERT INTO change_rows(changeset_id,table_name,before_row,after_row) SELECT id,'memories',json_object('id',OLD.id,'node_uuid',OLD.node_uuid,'content',OLD.content,'deprecated',OLD.deprecated,'migrated_to',OLD.migrated_to,'created_at',OLD.created_at),NULL FROM audit_context; END;
+CREATE TRIGGER audit_memories_INSERT AFTER INSERT ON memories WHEN (SELECT id FROM audit_context LIMIT 1) IS NOT NULL BEGIN INSERT INTO change_rows(changeset_id,table_name,before_row,after_row) SELECT id,'memories',NULL,json_object('id',NEW.id,'node_uuid',NEW.node_uuid,'content_id',NEW.content_id,'deprecated',NEW.deprecated,'migrated_to',NEW.migrated_to,'created_at',NEW.created_at) FROM audit_context; END;
+CREATE TRIGGER audit_memories_UPDATE AFTER UPDATE ON memories WHEN (SELECT id FROM audit_context LIMIT 1) IS NOT NULL BEGIN INSERT INTO change_rows(changeset_id,table_name,before_row,after_row) SELECT id,'memories',json_object('id',OLD.id,'node_uuid',OLD.node_uuid,'content_id',OLD.content_id,'deprecated',OLD.deprecated,'migrated_to',OLD.migrated_to,'created_at',OLD.created_at),json_object('id',NEW.id,'node_uuid',NEW.node_uuid,'content_id',NEW.content_id,'deprecated',NEW.deprecated,'migrated_to',NEW.migrated_to,'created_at',NEW.created_at) FROM audit_context; END;
+CREATE TRIGGER audit_memories_DELETE AFTER DELETE ON memories WHEN (SELECT id FROM audit_context LIMIT 1) IS NOT NULL BEGIN INSERT INTO change_rows(changeset_id,table_name,before_row,after_row) SELECT id,'memories',json_object('id',OLD.id,'node_uuid',OLD.node_uuid,'content_id',OLD.content_id,'deprecated',OLD.deprecated,'migrated_to',OLD.migrated_to,'created_at',OLD.created_at),NULL FROM audit_context; END;
 CREATE TRIGGER audit_edges_INSERT AFTER INSERT ON edges WHEN (SELECT id FROM audit_context LIMIT 1) IS NOT NULL BEGIN INSERT INTO change_rows(changeset_id,table_name,before_row,after_row) SELECT id,'edges',NULL,json_object('id',NEW.id,'parent_uuid',NEW.parent_uuid,'child_uuid',NEW.child_uuid,'name',NEW.name,'priority',NEW.priority,'disclosure',NEW.disclosure,'created_at',NEW.created_at) FROM audit_context; END;
 CREATE TRIGGER audit_edges_UPDATE AFTER UPDATE ON edges WHEN (SELECT id FROM audit_context LIMIT 1) IS NOT NULL BEGIN INSERT INTO change_rows(changeset_id,table_name,before_row,after_row) SELECT id,'edges',json_object('id',OLD.id,'parent_uuid',OLD.parent_uuid,'child_uuid',OLD.child_uuid,'name',OLD.name,'priority',OLD.priority,'disclosure',OLD.disclosure,'created_at',OLD.created_at),json_object('id',NEW.id,'parent_uuid',NEW.parent_uuid,'child_uuid',NEW.child_uuid,'name',NEW.name,'priority',NEW.priority,'disclosure',NEW.disclosure,'created_at',NEW.created_at) FROM audit_context; END;
 CREATE TRIGGER audit_edges_DELETE AFTER DELETE ON edges WHEN (SELECT id FROM audit_context LIMIT 1) IS NOT NULL BEGIN INSERT INTO change_rows(changeset_id,table_name,before_row,after_row) SELECT id,'edges',json_object('id',OLD.id,'parent_uuid',OLD.parent_uuid,'child_uuid',OLD.child_uuid,'name',OLD.name,'priority',OLD.priority,'disclosure',OLD.disclosure,'created_at',OLD.created_at),NULL FROM audit_context; END;
@@ -41,20 +51,25 @@ CREATE TABLE search_documents (
         namespace TEXT NOT NULL, domain TEXT NOT NULL, path TEXT NOT NULL,
         node_uuid TEXT NOT NULL REFERENCES nodes(uuid) ON DELETE CASCADE,
         memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-        uri TEXT NOT NULL, content TEXT NOT NULL, disclosure TEXT,
+        uri TEXT NOT NULL, disclosure TEXT,
         search_terms TEXT NOT NULL DEFAULT '', priority INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(namespace,domain,path));
         CREATE INDEX ix_search_documents_node ON search_documents(node_uuid);
+        CREATE VIEW search_document_rows AS SELECT s.*,c.content FROM search_documents s JOIN memories m ON m.id=s.memory_id JOIN contents c ON c.id=m.content_id;
+        CREATE TRIGGER memory_search_delete BEFORE DELETE ON memories BEGIN DELETE FROM search_documents WHERE memory_id=old.id; END;
         CREATE VIRTUAL TABLE search_documents_fts USING fts5(
         namespace UNINDEXED, domain UNINDEXED, path, node_uuid UNINDEXED,
-        uri, content, disclosure, search_terms, content='search_documents', content_rowid='id', tokenize='unicode61');
+        uri, content, disclosure, search_terms, content='search_document_rows', content_rowid='id', tokenize='unicode61');
         CREATE TRIGGER search_documents_ai AFTER INSERT ON search_documents BEGIN
-          INSERT INTO search_documents_fts(rowid,namespace,domain,path,node_uuid,uri,content,disclosure,search_terms) VALUES(new.id,new.namespace,new.domain,new.path,new.node_uuid,new.uri,new.content,new.disclosure,new.search_terms);
+          INSERT INTO search_documents_fts(rowid,namespace,domain,path,node_uuid,uri,content,disclosure,search_terms) VALUES(new.id,new.namespace,new.domain,new.path,new.node_uuid,new.uri,(SELECT content FROM memory_rows WHERE id=new.memory_id),new.disclosure,new.search_terms);
         END;
-        CREATE TRIGGER search_documents_ad AFTER DELETE ON search_documents BEGIN
-          INSERT INTO search_documents_fts(search_documents_fts,rowid,namespace,domain,path,node_uuid,uri,content,disclosure,search_terms) VALUES('delete',old.id,old.namespace,old.domain,old.path,old.node_uuid,old.uri,old.content,old.disclosure,old.search_terms);
+        CREATE TRIGGER search_documents_ad BEFORE DELETE ON search_documents BEGIN
+          INSERT INTO search_documents_fts(search_documents_fts,rowid,namespace,domain,path,node_uuid,uri,content,disclosure,search_terms) VALUES('delete',old.id,old.namespace,old.domain,old.path,old.node_uuid,old.uri,(SELECT content FROM memory_rows WHERE id=old.memory_id),old.disclosure,old.search_terms);
         END;
         CREATE TRIGGER search_documents_au AFTER UPDATE ON search_documents BEGIN
-          INSERT INTO search_documents_fts(search_documents_fts,rowid,namespace,domain,path,node_uuid,uri,content,disclosure,search_terms) VALUES('delete',old.id,old.namespace,old.domain,old.path,old.node_uuid,old.uri,old.content,old.disclosure,old.search_terms);
-          INSERT INTO search_documents_fts(rowid,namespace,domain,path,node_uuid,uri,content,disclosure,search_terms) VALUES(new.id,new.namespace,new.domain,new.path,new.node_uuid,new.uri,new.content,new.disclosure,new.search_terms);
+          INSERT INTO search_documents_fts(search_documents_fts,rowid,namespace,domain,path,node_uuid,uri,content,disclosure,search_terms) VALUES('delete',old.id,old.namespace,old.domain,old.path,old.node_uuid,old.uri,(SELECT content FROM memory_rows WHERE id=old.memory_id),old.disclosure,old.search_terms);
+          INSERT INTO search_documents_fts(rowid,namespace,domain,path,node_uuid,uri,content,disclosure,search_terms) VALUES(new.id,new.namespace,new.domain,new.path,new.node_uuid,new.uri,(SELECT content FROM memory_rows WHERE id=new.memory_id),new.disclosure,new.search_terms);
         END;
+
+CREATE TRIGGER memory_search_change BEFORE UPDATE OF content_id ON memories WHEN old.content_id IS NOT new.content_id BEGIN DELETE FROM search_documents WHERE memory_id=old.id; END;
+CREATE TRIGGER node_search_delete BEFORE DELETE ON nodes BEGIN DELETE FROM search_documents WHERE node_uuid=old.uuid; END;

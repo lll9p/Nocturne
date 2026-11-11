@@ -3,7 +3,7 @@ use rusqlite::Connection;
 
 fn seed(c: &Connection) {
     c.execute_batch("INSERT INTO nodes(uuid) VALUES('a');
-        INSERT INTO memories(node_uuid,content) VALUES('a','oldword');
+        INSERT INTO contents(content) VALUES('oldword'); INSERT INTO memories(node_uuid,content_id) VALUES('a',last_insert_rowid());
         INSERT INTO edges(parent_uuid,child_uuid,name) VALUES('00000000-0000-0000-0000-000000000000','a','item');
         INSERT INTO paths(namespace,domain,path,node_uuid,edge_id) SELECT 'one','core','item','a',id FROM edges WHERE child_uuid='a';
         INSERT INTO paths(namespace,domain,path,node_uuid,edge_id) SELECT 'two','core','alias','a',id FROM edges WHERE child_uuid='a';").unwrap();
@@ -32,17 +32,15 @@ fn triggers_refresh_cascade_and_null_disclosure() {
     search::rebuild(c, Some("one")).unwrap();
     assert_eq!(matches(c, "oldword"), 2);
     c.execute_batch(
-        "UPDATE memories SET content='newword' WHERE node_uuid='a'",
+        "INSERT INTO contents(content) VALUES('newword'); UPDATE memories SET content_id=last_insert_rowid() WHERE node_uuid='a'",
     )
     .unwrap();
     search::refresh(c, &["a".into()]).unwrap();
     assert_eq!(matches(c, "oldword"), 0);
     assert_eq!(matches(c, "newword"), 2);
-    c.execute_batch(
-        "UPDATE search_documents SET content='directword',search_terms='' ",
-    )
-    .unwrap();
-    assert_eq!(matches(c, "newword"), 0);
+    c.execute_batch("UPDATE search_documents SET search_terms='directword' ")
+        .unwrap();
+    assert_eq!(matches(c, "newword"), 2);
     assert_eq!(matches(c, "directword"), 2);
     c.execute_batch("DELETE FROM memories WHERE node_uuid='a'")
         .unwrap();

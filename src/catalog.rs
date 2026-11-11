@@ -36,7 +36,7 @@ pub fn paths(
         .transpose()?;
     let mut q = c.prepare("SELECT p.namespace,p.domain,p.path,p.node_uuid,p.edge_id,e.priority,e.disclosure,m.id
         FROM paths p LEFT JOIN edges e ON e.id=p.edge_id AND e.child_uuid=p.node_uuid
-        LEFT JOIN memories m ON m.node_uuid=p.node_uuid AND m.deprecated=0
+        LEFT JOIN memory_rows m ON m.node_uuid=p.node_uuid AND m.deprecated=0
         WHERE (?2 OR p.namespace=?1) AND (?3 IS NULL OR p.domain=?3) AND (?4 IS NULL OR p.node_uuid=?4)
         ORDER BY p.namespace,p.domain,p.path")?;
     let rows = q.query_map(params![ns,all_namespaces,domain,node], |r| Ok(json!({

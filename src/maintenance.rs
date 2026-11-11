@@ -85,6 +85,10 @@ pub fn doctor(conn: &Connection) -> Result<Value> {
     }
     for (check, sql) in [
         (
+            "unreferenced_contents",
+            "SELECT count(*) FROM contents b WHERE NOT EXISTS(SELECT 1 FROM memories m WHERE m.content_id=b.id) AND NOT EXISTS(SELECT 1 FROM change_rows r WHERE r.before_content_id=b.id OR r.after_content_id=b.id)",
+        ),
+        (
             "attrs_json",
             "SELECT count(*) FROM node_attrs WHERE CASE WHEN json_valid(data_json) THEN json_type(data_json)<>'object' ELSE 1 END",
         ),
@@ -94,7 +98,7 @@ pub fn doctor(conn: &Connection) -> Result<Value> {
         ),
         (
             "path_without_active",
-            "SELECT count(*) FROM paths p WHERE p.node_uuid<>'00000000-0000-0000-0000-000000000000' AND NOT EXISTS(SELECT 1 FROM memories m WHERE m.node_uuid=p.node_uuid AND m.deprecated=0)",
+            "SELECT count(*) FROM paths p WHERE p.node_uuid<>'00000000-0000-0000-0000-000000000000' AND NOT EXISTS(SELECT 1 FROM memory_rows m WHERE m.node_uuid=p.node_uuid AND m.deprecated=0)",
         ),
         (
             "path_without_edge",
@@ -102,7 +106,7 @@ pub fn doctor(conn: &Connection) -> Result<Value> {
         ),
         (
             "active_versions",
-            "SELECT count(*) FROM (SELECT node_uuid FROM memories WHERE deprecated=0 GROUP BY node_uuid HAVING count(*)>1)",
+            "SELECT count(*) FROM (SELECT node_uuid FROM memory_rows WHERE deprecated=0 GROUP BY node_uuid HAVING count(*)>1)",
         ),
         (
             "active_presets",
@@ -114,16 +118,16 @@ pub fn doctor(conn: &Connection) -> Result<Value> {
         ),
         (
             "version_reference",
-            "SELECT count(*) FROM memories m LEFT JOIN memories n ON n.id=m.migrated_to WHERE m.migrated_to IS NOT NULL AND (n.id IS NULL OR n.node_uuid<>m.node_uuid)",
+            "SELECT count(*) FROM memory_rows m LEFT JOIN memory_rows n ON n.id=m.migrated_to WHERE m.migrated_to IS NOT NULL AND (n.id IS NULL OR n.node_uuid<>m.node_uuid)",
         ),
         (
             "version_cycle",
-            "WITH RECURSIVE reach(a,b) AS (SELECT id,migrated_to FROM memories WHERE migrated_to IS NOT NULL UNION SELECT r.a,m.migrated_to FROM reach r JOIN memories m ON m.id=r.b WHERE m.migrated_to IS NOT NULL) SELECT count(*) FROM reach WHERE a=b",
+            "WITH RECURSIVE reach(a,b) AS (SELECT id,migrated_to FROM memory_rows WHERE migrated_to IS NOT NULL UNION SELECT r.a,m.migrated_to FROM reach r JOIN memory_rows m ON m.id=r.b WHERE m.migrated_to IS NOT NULL) SELECT count(*) FROM reach WHERE a=b",
         ),
         ("graph_cycle", crate::graph::CYCLE_COUNT_SQL),
         (
             "active_unreachable",
-            "SELECT count(*) FROM memories m WHERE deprecated=0 AND node_uuid<>'00000000-0000-0000-0000-000000000000' AND NOT EXISTS(SELECT 1 FROM paths p WHERE p.node_uuid=m.node_uuid)",
+            "SELECT count(*) FROM memory_rows m WHERE deprecated=0 AND node_uuid<>'00000000-0000-0000-0000-000000000000' AND NOT EXISTS(SELECT 1 FROM paths p WHERE p.node_uuid=m.node_uuid)",
         ),
     ] {
         let count: i64 = conn.query_row(sql, [], |r| r.get(0))?;
@@ -150,7 +154,7 @@ pub fn doctor(conn: &Connection) -> Result<Value> {
         }
     }
     // Search tables are derived, but missing rows must never look healthy.
-    let expected: i64 = conn.query_row("SELECT count(*) FROM paths p JOIN memories m ON m.node_uuid=p.node_uuid AND m.deprecated=0", [], |r| r.get(0))?;
+    let expected: i64 = conn.query_row("SELECT count(*) FROM paths p JOIN memory_rows m ON m.node_uuid=p.node_uuid AND m.deprecated=0", [], |r| r.get(0))?;
     let actual: i64 =
         conn.query_row("SELECT count(*) FROM search_documents", [], |r| {
             r.get(0)
@@ -165,7 +169,8 @@ pub fn doctor(conn: &Connection) -> Result<Value> {
     ) {
         issues.push(json!({"check":"fts_integrity","detail":error.to_string()}));
     }
-    let stale: i64 = conn.query_row("SELECT count(*) FROM search_documents s LEFT JOIN paths p ON p.namespace=s.namespace AND p.domain=s.domain AND p.path=s.path LEFT JOIN memories m ON m.id=s.memory_id LEFT JOIN edges e ON e.id=p.edge_id WHERE p.node_uuid IS NOT s.node_uuid OR m.node_uuid IS NOT s.node_uuid OR m.deprecated IS NOT 0 OR m.content IS NOT s.content OR s.priority IS NOT e.priority OR s.disclosure IS NOT e.disclosure OR s.uri IS NOT (p.domain || '://' || p.path)", [], |r| r.get(0))?;
+    // Bodies are shared; FTS integrity above compares postings with the canonical content.
+    let stale: i64 = conn.query_row("SELECT count(*) FROM search_documents s LEFT JOIN paths p ON p.namespace=s.namespace AND p.domain=s.domain AND p.path=s.path LEFT JOIN memories m ON m.id=s.memory_id LEFT JOIN edges e ON e.id=p.edge_id WHERE p.node_uuid IS NOT s.node_uuid OR m.node_uuid IS NOT s.node_uuid OR m.deprecated IS NOT 0 OR s.priority IS NOT e.priority OR s.disclosure IS NOT e.disclosure OR s.uri IS NOT (p.domain || '://' || p.path)", [], |r| r.get(0))?;
     if stale > 0 {
         issues.push(json!({"check":"search_stale","count":stale}));
     }

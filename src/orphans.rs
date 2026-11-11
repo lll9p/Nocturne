@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 // Namespace ownership follows the last effective route deletion, never old access.
 const ELIGIBLE: &str = "m.node_uuid<>?3
  AND NOT EXISTS(SELECT 1 FROM paths p WHERE p.node_uuid=m.node_uuid)
- AND NOT EXISTS(SELECT 1 FROM memories a WHERE a.node_uuid=m.node_uuid AND a.deprecated=0)
+ AND NOT EXISTS(SELECT 1 FROM memory_rows a WHERE a.node_uuid=m.node_uuid AND a.deprecated=0)
  AND (?2 OR ?1=(SELECT json_extract(r.before_row,'$.namespace')
  FROM change_rows r JOIN changesets s ON s.id=r.changeset_id
  WHERE r.table_name='paths' AND r.after_row IS NULL
@@ -65,9 +65,9 @@ fn list_snapshot(
 ) -> Result<Value> {
     let mut q = c.prepare(&format!(
         "SELECT m.node_uuid,m.id,substr(m.content,1,200),
-        (SELECT count(*) FROM memories v WHERE v.node_uuid=m.node_uuid),m.created_at
-        FROM memories m WHERE {ELIGIBLE}
-        AND m.id=(SELECT max(v.id) FROM memories v WHERE v.node_uuid=m.node_uuid)
+        (SELECT count(*) FROM memory_rows v WHERE v.node_uuid=m.node_uuid),m.created_at
+        FROM memory_rows m WHERE {ELIGIBLE}
+        AND m.id=(SELECT max(v.id) FROM memory_rows v WHERE v.node_uuid=m.node_uuid)
         ORDER BY m.id DESC"
     ))?;
     let mut rows = q
@@ -91,14 +91,20 @@ fn selected(
 ) -> Result<(String, String)> {
     c.query_row(
         &format!(
-            "SELECT m.node_uuid,m.content FROM memories m
+            "SELECT m.node_uuid,m.content FROM memory_rows m
         WHERE m.id=?4 AND {ELIGIBLE}"
         ),
         params![ns, all, ROOT, id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
     .optional()?
-    .ok_or_else(|| Error::NotFound("orphan memory".into()))
+    .ok_or_else(|| {
+        Error::NotFound(if all {
+            format!("orphan memory {id} not found across all namespaces")
+        } else {
+            format!("orphan memory {id} not found in namespace {ns:?}")
+        })
+    })
 }
 
 pub fn show(
@@ -108,7 +114,7 @@ pub fn show(
         let (node, content) = selected(c, ns, memory_id, all_namespaces)?;
         let mut q = c.prepare(
             "SELECT id,content,deprecated,migrated_to,created_at
-            FROM memories WHERE node_uuid=?1 ORDER BY id DESC",
+            FROM memory_rows WHERE node_uuid=?1 ORDER BY id DESC",
         )?;
         let history = q
             .query_map([&node], |r| {
@@ -135,10 +141,15 @@ pub fn restore(
     let (node, content) = selected(c, ns, memory_id, all_namespaces)?;
     let dst = Uri::parse(destination)?;
     graph::validate_priority(priority)?;
-    if dst.path.is_empty() || dst.domain == "system" {
-        return Err(Error::Invalid(
-            "invalid restore destination or priority".into(),
-        ));
+    if dst.path.is_empty() {
+        return Err(Error::Invalid(format!(
+            "restore destination {destination:?} must have a non-empty path"
+        )));
+    }
+    if dst.domain == "system" {
+        return Err(Error::Invalid(format!(
+            "restore destination {destination:?} uses the reserved system domain"
+        )));
     }
     let exists: bool = c.query_row(
         "SELECT EXISTS(SELECT 1 FROM paths
@@ -160,32 +171,19 @@ pub fn restore(
     if cycle {
         return Err(Error::Conflict("restore would create a cycle".into()));
     }
-    let edge: Option<i64> = c
-        .query_row(
-            "SELECT id FROM edges WHERE parent_uuid=?1 AND child_uuid=?2",
-            params![parent, node],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if let Some(edge) = edge {
-        let used: bool = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM paths WHERE edge_id=?1)",
-            [edge],
-            |r| r.get(0),
-        )?;
-        if used {
-            return Err(Error::Conflict("restore edge is still in use".into()));
-        }
-    }
+    c.execute(
+        "DELETE FROM edges WHERE child_uuid=?1 AND NOT EXISTS(SELECT 1 FROM paths WHERE edge_id=edges.id)",
+        [&node],
+    )?;
     let terminal: Option<i64> = c.query_row(
-        "SELECT max(id) FROM memories
+        "SELECT max(id) FROM memory_rows
         WHERE node_uuid=?1 AND migrated_to IS NULL",
         [&node],
         |r| r.get(0),
     )?;
     c.execute(
-        "INSERT INTO memories(node_uuid,content) VALUES(?1,?2)",
-        params![node, content],
+        "INSERT INTO memories(node_uuid,content_id) VALUES(?1,?2)",
+        params![node, crate::content::insert(c, &content)?],
     )?;
     let new_id = c.last_insert_rowid();
     if let Some(old) = terminal {
@@ -194,23 +192,12 @@ pub fn restore(
             params![new_id, old],
         )?;
     }
-    let edge = match edge {
-        Some(edge) => {
-            c.execute(
-                "UPDATE edges SET name=?1,priority=?2,disclosure=?3 WHERE id=?4",
-                params![name, priority, disclosure, edge],
-            )?;
-            edge
-        }
-        None => {
-            c.execute(
-                "INSERT INTO edges(parent_uuid,child_uuid,name,priority,disclosure)
-                VALUES(?1,?2,?3,?4,?5)",
-                params![parent, node, name, priority, disclosure],
-            )?;
-            c.last_insert_rowid()
-        }
-    };
+    c.execute(
+        "INSERT INTO edges(parent_uuid,child_uuid,name,priority,disclosure)
+        VALUES(?1,?2,?3,?4,?5)",
+        params![parent, node, name, priority, disclosure],
+    )?;
+    let edge = c.last_insert_rowid();
     c.execute(
         "INSERT INTO paths(namespace,domain,path,edge_id,node_uuid) VALUES(?1,?2,?3,?4,?5)",
         params![ns, dst.domain, dst.path, edge, node],

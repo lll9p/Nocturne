@@ -4,7 +4,7 @@ use crate::{
     store::ROOT,
     uri::{Uri, validate_name},
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -96,47 +96,32 @@ pub fn move_path(
         );
     }
     let old_edge = rows[0].1;
-    let (old_parent, priority, disclosure): (String, i64, Option<String>) = c
+    let (_, priority, disclosure): (String, i64, Option<String>) = c
         .query_row(
-        "SELECT parent_uuid,priority,disclosure FROM edges WHERE id=?1",
-        [old_edge],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
+            "SELECT parent_uuid,priority,disclosure FROM edges WHERE id=?1",
+            [old_edge],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
     // Plan all preset edits before changing graph rows, including inactive presets.
     let boot = boot_updates(c, ns, &routes)?;
-    let edge = if parent == old_parent {
-        let references: i64 = c.query_row(
-            "SELECT count(*) FROM paths WHERE edge_id=?1",
-            [old_edge],
-            |r| r.get(0),
+    let references: i64 = c.query_row(
+        "SELECT count(*) FROM paths WHERE edge_id=?1",
+        [old_edge],
+        |r| r.get(0),
+    )?;
+    let moved = rows.iter().filter(|r| r.1 == old_edge).count() as i64;
+    let edge = if references == moved {
+        c.execute(
+            "UPDATE edges SET parent_uuid=?1,name=?2 WHERE id=?3",
+            params![parent, name, old_edge],
         )?;
-        let moved = rows.iter().filter(|r| r.1 == old_edge).count() as i64;
-        if references == moved {
-            c.execute(
-                "UPDATE edges SET name=?1 WHERE id=?2",
-                params![name, old_edge],
-            )?;
-        }
         old_edge
     } else {
-        let existing = c.query_row("SELECT id,priority,disclosure,EXISTS(SELECT 1 FROM paths WHERE edge_id=edges.id) FROM edges WHERE parent_uuid=?1 AND child_uuid=?2",params![parent,node],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,bool>(3)?))).optional()?;
-        if let Some((id, p, d, used)) = existing {
-            if used && (p != priority || d != disclosure) {
-                return Err(Error::Conflict(
-                    "destination edge metadata differs".into(),
-                ));
-            }
-            if !used {
-                c.execute(
-                    "UPDATE edges SET name=?1,priority=?2,disclosure=?3 WHERE id=?4",
-                    params![name, priority, disclosure, id],
-                )?;
-            }
-            id
-        } else {
-            c.execute("INSERT INTO edges(parent_uuid,child_uuid,name,priority,disclosure) VALUES(?1,?2,?3,?4,?5)",params![parent,node,name,priority,disclosure])?;
-            c.last_insert_rowid()
-        }
+        c.execute(
+            "INSERT INTO edges(parent_uuid,child_uuid,name,priority,disclosure) VALUES(?1,?2,?3,?4,?5)",
+            params![parent, node, name, priority, disclosure],
+        )?;
+        c.last_insert_rowid()
     };
     for (path, _, _, _) in &rows {
         c.execute(
@@ -167,15 +152,6 @@ pub fn move_path(
 fn boot_updates(
     c: &Connection, ns: &str, routes: &BTreeMap<String, String>,
 ) -> Result<Vec<(i64, String)>> {
-    let mut q = c.prepare(
-        "SELECT namespace FROM paths WHERE namespace<>''
-         UNION SELECT namespace FROM changesets WHERE namespace<>''
-         UNION SELECT namespace FROM glossary_keywords WHERE namespace<>''
-         UNION SELECT namespace FROM memory_access_logs WHERE namespace<>''",
-    )?;
-    let namespaces = q
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
     let mut q = c.prepare("SELECT id,boot_uris FROM presets ORDER BY id")?;
     let presets = q
         .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
@@ -184,27 +160,19 @@ fn boot_updates(
     for (id, text) in presets {
         let mut map: serde_json::Map<String, Value> =
             serde_json::from_str(&text)?;
-        // Validate the entire namespace map, not only the selected fallback.
         for value in map.values() {
             let _: Vec<String> = serde_json::from_value(value.clone())?;
         }
-        let Some(original) = map.get(ns).or_else(|| map.get("")).cloned()
-        else {
+        let Some(original) = map.get(ns).cloned() else {
             continue;
         };
-        let uris: Vec<String> = serde_json::from_value(original.clone())?;
+        let uris: Vec<String> = serde_json::from_value(original)?;
         let rewritten: Vec<String> = uris
             .iter()
             .map(|u| routes.get(u).unwrap_or(u).clone())
             .collect();
         if uris == rewritten {
             continue;
-        }
-        if ns.is_empty() {
-            for namespace in &namespaces {
-                map.entry(namespace.clone())
-                    .or_insert_with(|| original.clone());
-            }
         }
         map.insert(ns.into(), json!(rewritten));
         updates.push((id, serde_json::to_string(&map)?));
